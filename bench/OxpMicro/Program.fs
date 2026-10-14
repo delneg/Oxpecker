@@ -92,6 +92,7 @@ type Endpoints() =
     [<Benchmark>] member _.Composed() = h.Run("/composed", "")
     [<Benchmark>] member _.Html() = h.Run("/html", "")
     [<Benchmark>] member _.SubRoute() = h.Run("/api/users", "")
+    [<Benchmark>] member _.HtmlDynamic() = h.Run("/html-dynamic", "")
     [<Benchmark>] member _.SubRoutef() = h.Run("/org/acme/info", "")
     [<Benchmark>] member _.NoCache() = h.Run("/nocache", "")
     [<Benchmark>] member _.Precond() = h.Run("/precond", "")
@@ -166,7 +167,7 @@ let main args =
         let h = Harness()
         let cases = [ "plaintext","/plaintext",""; "json","/json",""; "json-users","/json-users",""; "user","/user/don/42","";
                       "ctx","/userctx/don/42",""; "headers","/headers","?q=1"; "composed","/composed",""; "html","/html",""; "subroute","/api/users","";
-                      "bind-query","/bind-query","?Name=don&Age=42"; "bind-form","/bind-form",""; "bind-json","/bind-json",""; "nocache","/nocache",""; "precond","/precond",""; "subroutef","/org/acme/info","" ]
+                      "bind-query","/bind-query","?Name=don&Age=42"; "bind-form","/bind-form",""; "bind-json","/bind-json",""; "nocache","/nocache",""; "precond","/precond",""; "subroutef","/org/acme/info",""; "html-dynamic","/html-dynamic","" ]
         let run name p q =
             match name with
             | "bind-form" -> h.Run("POST", p, q, "application/x-www-form-urlencoded", formBody)

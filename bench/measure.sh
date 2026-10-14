@@ -4,7 +4,7 @@
 # and prints per-endpoint: server-side allocated bytes/request, req/s, p50 latency, gen0 GCs per 100k req.
 set -euo pipefail
 CPU=${1:-all}; DUR=${2:-3}; shift 2 || true
-EPS=${*:-"plaintext json json-users user ctx headers composed html subroute bind-query bind-form bind-json nocache precond subroutef"}
+EPS=${*:-"plaintext json json-users user ctx headers composed html subroute bind-query bind-form bind-json nocache precond subroutef html-dynamic"}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 DLL=$ROOT/bench/OxpBench/bin/Release/net10.0/OxpBench.dll
 PORT=${BENCH_PORT:-5099}
@@ -19,7 +19,7 @@ url() { case $1 in
   plaintext) echo /plaintext;; json) echo /json;; json-users) echo /json-users;;
   user) echo /user/don/42;; ctx) echo /userctx/don/42;; headers) echo "/headers?q=1";;
   composed) echo /composed;; html) echo /html;; subroute) echo /api/users;;
-  bind-query) echo "/bind-query?Name=don&Age=42";; nocache) echo /nocache;; subroutef) echo /org/acme/info;; precond) echo /precond;; bind-form) echo /bind-form;; bind-json) echo /bind-json;; esac; }
+  bind-query) echo "/bind-query?Name=don&Age=42";; nocache) echo /nocache;; subroutef) echo /org/acme/info;; html-dynamic) echo /html-dynamic;; precond) echo /precond;; bind-form) echo /bind-form;; bind-json) echo /bind-json;; esac; }
 lua() { case $1 in
   bind-form) echo "$ROOT/bench/post-form.lua";; bind-json) echo "$ROOT/bench/post-json.lua";; *) echo "$ROOT/bench/get.lua";; esac; }
 for ep in $EPS; do
