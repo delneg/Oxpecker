@@ -116,6 +116,17 @@ type Direct() =
     [<Benchmark>] member _.ComposeHeaders() = headers ctx
     [<Benchmark>] member _.ExceptionMiddleware() = Default.exceptionMiddleware ctx nextOk
 
+/// WriteText alone on a reused context with a null body.
+[<MemoryDiagnoser>]
+type DirectWrite() =
+    let ctx = DefaultHttpContext()
+    do ctx.Response.Body <- Stream.Null
+    let short = "Hello, World!"
+    let medium = String('x', 2000)
+    [<Benchmark>] member _.A0Warmup() = (for _ in 1..4 do ctx.WriteText short |> ignore)
+    [<Benchmark>] member _.WriteTextShort() = ctx.WriteText short
+    [<Benchmark>] member _.WriteTextMedium() = ctx.WriteText medium
+
 /// Oxpecker's routef request delegate alone, with route values already set (as routing would).
 [<MemoryDiagnoser>]
 type DirectRoutef() =
