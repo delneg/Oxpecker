@@ -389,12 +389,22 @@ type HttpContextExtensions() =
     [<Extension>]
     static member BindJson<'T>(ctx: HttpContext) =
         let serializer = ctx.GetJsonSerializer()
-        task {
+        let deserialized =
             try
-                return! serializer.Deserialize<'T>(ctx)
-            with ex when not(ex :? OperationCanceledException) ->
-                return raise <| ModelBindException("Unable to deserialize model from JSON", ex)
-        }
+                serializer.Deserialize<'T>(ctx)
+            with ex ->
+                // handled below exactly like an asynchronous failure
+                Task.FromException<'T> ex
+        if deserialized.IsCompletedSuccessfully then
+            // nothing to wrap: hand out the completed task instead of allocating another one
+            deserialized
+        else
+            task {
+                try
+                    return! deserialized
+                with ex when not(ex :? OperationCanceledException) ->
+                    return raise <| ModelBindException("Unable to deserialize model from JSON", ex)
+            }
 
     /// <summary>
     /// Parses all input elements from an HTML form into an object of type 'T.
