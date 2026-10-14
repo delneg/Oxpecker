@@ -45,19 +45,13 @@ type IJsonSerializer =
 type SystemTextJsonSerializer(?options: JsonSerializerOptions) =
     let options = defaultArg options <| JsonSerializerOptions(JsonSerializerDefaults.Web)
 
-    let serializeToStreamWithLength
-        value
-        (stream: RecyclableMemoryStream)
-        (ctx: HttpContext)
-        (options: JsonSerializerOptions)
-        =
+    let serializeToStreamWithLength value (stream: PooledBufferStream) (ctx: HttpContext) (options: JsonSerializerOptions) =
         ctx.RequestAborted.ThrowIfCancellationRequested()
         JsonSerializer.Serialize(stream, value, options)
         ctx.Response.ContentType <- "application/json; charset=utf-8"
         ctx.Response.Headers.ContentLength <- stream.Length
-        stream.Seek(0, SeekOrigin.Begin) |> ignore
         if ctx.Request.Method <> HttpMethods.Head then
-            stream.CopyToAsync(ctx.Response.Body, ctx.RequestAborted)
+            ctx.Response.Body.WriteAsync(stream.WrittenMemory, ctx.RequestAborted).AsTask()
         else
             Task.CompletedTask
 
@@ -75,7 +69,8 @@ type SystemTextJsonSerializer(?options: JsonSerializerOptions) =
                     Task.CompletedTask
             else
                 task {
-                    use stream = recyclableMemoryStreamManager.Value.GetStream()
+                    // a pooled buffer instead of a RecyclableMemoryStream with its block list per response
+                    use stream = new PooledBufferStream()
                     return! serializeToStreamWithLength value stream ctx options
                 }
 

@@ -1,6 +1,47 @@
 namespace Oxpecker
 
+open System
+open System.Buffers
+open System.IO
 open Microsoft.IO
+
+/// <summary>
+/// Write-only stream over a single ArrayPool buffer that grows as needed; the buffer goes back to the pool on Dispose.
+/// Lets a response body be measured (Content-Length) before it is written, with one small object per response.
+/// </summary>
+[<Sealed>]
+type internal PooledBufferStream() =
+    inherit Stream()
+    let mutable buffer: byte array = Array.Empty<byte>()
+    let mutable length = 0
+    member _.WrittenMemory = ReadOnlyMemory<byte>(buffer, 0, length)
+    override _.CanRead = false
+    override _.CanSeek = false
+    override _.CanWrite = true
+    override _.Length = int64 length
+    override _.Position
+        with get () = int64 length
+        and set _ = raise(NotSupportedException())
+    override _.Flush() = ()
+    override _.Read(_: byte array, _: int, _: int) : int = raise(NotSupportedException())
+    override _.Seek(_: int64, _: SeekOrigin) : int64 = raise(NotSupportedException())
+    override _.SetLength(_: int64) = raise(NotSupportedException())
+    override _.Write(source: ReadOnlySpan<byte>) =
+        if source.Length > buffer.Length - length then
+            let newBuffer = ArrayPool<byte>.Shared.Rent(max (length + source.Length) (buffer.Length * 2))
+            buffer.AsSpan(0, length).CopyTo(newBuffer)
+            if buffer.Length > 0 then
+                ArrayPool<byte>.Shared.Return buffer
+            buffer <- newBuffer
+        source.CopyTo(buffer.AsSpan(length))
+        length <- length + source.Length
+    override this.Write(source: byte array, offset: int, count: int) =
+        this.Write(ReadOnlySpan<byte>(source, offset, count))
+    override _.Dispose(disposing: bool) =
+        if buffer.Length > 0 then
+            ArrayPool<byte>.Shared.Return buffer
+        buffer <- Array.Empty<byte>()
+        length <- 0
 
 [<AutoOpen>]
 module Helpers =
