@@ -96,7 +96,7 @@ let main args =
             printfn "MICRO %s alloc_per_call=%.1f" name (float (a1 - a0) / float n)
         0
     else
-        let job = Job.Default.WithToolchain(InProcessEmitToolchain.Instance).WithWarmupCount(3).WithIterationCount(15).WithInvocationCount(16384).WithUnrollFactor(16)
+        let job = Job.Default.WithToolchain(InProcessEmitToolchain.Instance).WithWarmupCount(20).WithIterationCount(25).WithInvocationCount(16384).WithUnrollFactor(16)
         let config = DefaultConfig.Instance.AddJob(job).WithOptions(ConfigOptions.DisableOptimizationsValidator)
         BenchmarkSwitcher.FromAssembly(typeof<Endpoints>.Assembly).Run(args, config) |> ignore
         0
