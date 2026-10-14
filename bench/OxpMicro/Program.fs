@@ -80,8 +80,29 @@ type Endpoints() =
     [<Benchmark>] member _.Html() = h.Run("/html", "")
     [<Benchmark>] member _.SubRoute() = h.Run("/api/users", "")
 
+type AllocListener() =
+    inherit Diagnostics.Tracing.EventListener()
+    member val Counts = Collections.Concurrent.ConcurrentDictionary<string, int64>()
+    override this.OnEventSourceCreated(src) =
+        if src.Name = "Microsoft-Windows-DotNETRuntime" then
+            this.EnableEvents(src, Diagnostics.Tracing.EventLevel.Verbose, LanguagePrimitives.EnumOfValue<int64, Diagnostics.Tracing.EventKeywords> 1L)
+    override this.OnEventWritten(e) =
+        if e.EventName <> null && e.EventName.StartsWith "GCAllocationTick" then
+            let i = e.PayloadNames.IndexOf "TypeName"
+            let name = if i >= 0 then string e.Payload[i] else "?"
+            this.Counts.AddOrUpdate(name, 1L, fun _ v -> v + 1L) |> ignore
+
 [<EntryPoint>]
 let main args =
+    if args.Length > 1 && args[0] = "--profile" then
+        // sampled allocation types (one sample per ~100 KB allocated) for one endpoint
+        let h = Harness()
+        let path, query = match args[1] with "headers" -> "/headers", "?q=1" | "user" -> "/user/don/42", "" | "ctx" -> "/userctx/don/42", "" | "subroute" -> "/api/users", "" | p -> "/" + p, ""
+        for _ in 1..20000 do h.Run(path, query)
+        use l = new AllocListener()
+        for _ in 1..2000000 do h.Run(path, query)
+        for KeyValue(k, v) in l.Counts |> Seq.sortByDescending (fun kv -> kv.Value) |> Seq.truncate 25 do printfn "%8d %s" v k
+        exit 0
     if args.Length > 0 && args[0] = "--alloc" then
         // deterministic allocated bytes per call, no BDN
         let h = Harness()
