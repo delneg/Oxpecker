@@ -1,6 +1,72 @@
 namespace Oxpecker
 
+open System
+open System.Buffers
+open System.IO
 open Microsoft.IO
+
+/// <summary>
+/// Write-only stream (and buffer writer) over a single ArrayPool buffer that grows as needed; the buffer goes back to the pool on Dispose.
+/// Lets a response body be measured (Content-Length) before it is written, with one small object per response.
+/// </summary>
+[<Sealed>]
+type internal PooledBufferStream() =
+    inherit Stream()
+    let mutable buffer: byte array = Array.Empty<byte>()
+    let mutable length = 0
+    member _.WrittenMemory = ReadOnlyMemory<byte>(buffer, 0, length)
+    override _.CanRead = false
+    override _.CanSeek = false
+    override _.CanWrite = true
+    override _.Length = int64 length
+    override _.Position
+        with get () = int64 length
+        and set _ = raise(NotSupportedException())
+    override _.Flush() = ()
+    override _.Read(_: byte array, _: int, _: int) : int = raise(NotSupportedException())
+    override _.Seek(_: int64, _: SeekOrigin) : int64 = raise(NotSupportedException())
+    override _.SetLength(_: int64) = raise(NotSupportedException())
+    member private _.EnsureFree(size: int) =
+        if size > buffer.Length - length then
+            let newBuffer = ArrayPool<byte>.Shared.Rent(max (length + size) (buffer.Length * 2))
+            buffer.AsSpan(0, length).CopyTo(newBuffer)
+            if buffer.Length > 0 then
+                ArrayPool<byte>.Shared.Return buffer
+            buffer <- newBuffer
+    override this.Write(source: ReadOnlySpan<byte>) =
+        this.EnsureFree source.Length
+        source.CopyTo(buffer.AsSpan(length))
+        length <- length + source.Length
+    override this.Write(source: byte array, offset: int, count: int) =
+        this.Write(ReadOnlySpan<byte>(source, offset, count))
+    interface IBufferWriter<byte> with
+        member this.GetSpan(sizeHint) =
+            this.EnsureFree(max sizeHint 1)
+            buffer.AsSpan(length)
+        member this.GetMemory(sizeHint) =
+            this.EnsureFree(max sizeHint 1)
+            buffer.AsMemory(length)
+        member _.Advance(count) = length <- length + count
+    member private _.Reset() =
+        if buffer.Length > 0 then
+            ArrayPool<byte>.Shared.Return buffer
+        buffer <- Array.Empty<byte>()
+        length <- 0
+    override this.Dispose(disposing: bool) = this.Reset()
+    [<ThreadStatic; DefaultValue>]
+    static val mutable private spare: PooledBufferStream | null
+    /// Takes this thread's spare instance, or creates one
+    static member Rent() =
+        match PooledBufferStream.spare with
+        | null -> new PooledBufferStream()
+        | stream ->
+            PooledBufferStream.spare <- null
+            stream
+    /// Gives the buffer back to the pool and keeps the empty instance as the current thread's spare.
+    /// Only call it once the written data is no longer used.
+    member this.Return() =
+        this.Reset()
+        PooledBufferStream.spare <- this
 
 [<AutoOpen>]
 module Helpers =

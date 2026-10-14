@@ -1,6 +1,7 @@
 namespace Oxpecker
 
 open System
+open System.Buffers
 open System.Collections.Generic
 open System.IO
 open System.Runtime.CompilerServices
@@ -15,6 +16,34 @@ open Microsoft.Extensions.DependencyInjection
 open Microsoft.Extensions.Logging
 open Microsoft.Net.Http.Headers
 open Oxpecker.ViewEngine
+
+type internal StrictUtf8Encoder =
+    // the encoding a StreamWriter uses by default: UTF-8 without BOM that throws on invalid surrogates
+    static member val private Encoding = UTF8Encoding(false, true)
+    [<ThreadStatic; DefaultValue>]
+    static val mutable private cached: Encoder | null
+    /// One encoder per thread instead of one per response; encoding calls no user code, so it is never shared
+    static member Get() =
+        match StrictUtf8Encoder.cached with
+        | null ->
+            let encoder = StrictUtf8Encoder.Encoding.GetEncoder()
+            StrictUtf8Encoder.cached <- encoder
+            encoder
+        | encoder ->
+            // drops any state left by an encoding that threw
+            encoder.Reset()
+            encoder
+
+module internal HtmlWriting =
+    /// Encodes the builder into the writer with the same bytes and errors as a default StreamWriter,
+    /// without allocating StreamWriter's char and byte buffers
+    let encodeStrictUtf8 (sb: StringBuilder) (writer: IBufferWriter<byte>) =
+        let encoder = StrictUtf8Encoder.Get()
+        let mutable bytesUsed = 0L
+        let mutable completed = false
+        for chunk in sb.GetChunks() do
+            encoder.Convert(chunk.Span, writer, false, &bytesUsed, &completed)
+        encoder.Convert(ReadOnlySpan<char>.Empty, writer, true, &bytesUsed, &completed)
 
 type RouteParseException(message: string, ex) =
     inherit Exception(message, ex)
@@ -264,7 +293,28 @@ type HttpContextExtensions() =
     [<Extension>]
     static member WriteText(ctx: HttpContext, str: string) =
         ctx.SetContentType "text/plain; charset=utf-8"
-        ctx.WriteBytes(Encoding.UTF8.GetBytes str)
+        let byteCount = Encoding.UTF8.GetByteCount str
+        let cancellationToken = ctx.RequestAborted
+        // fail before anything is set or written, also for HEAD, once the request has been aborted
+        cancellationToken.ThrowIfCancellationRequested()
+        ctx.Response.ContentLength <- int64 byteCount
+        if ctx.Request.Method <> HttpMethods.Head then
+            // encode into a pooled buffer instead of allocating a new byte array per response
+            let buffer = ArrayPool<byte>.Shared.Rent byteCount
+            let written = Encoding.UTF8.GetBytes(str, 0, str.Length, buffer, 0)
+            let writeTask = ctx.Response.Body.WriteAsync(buffer, 0, written, cancellationToken)
+            if writeTask.IsCompletedSuccessfully then
+                ArrayPool<byte>.Shared.Return buffer
+                writeTask
+            else
+                task {
+                    try
+                        do! writeTask
+                    finally
+                        ArrayPool<byte>.Shared.Return buffer
+                }
+        else
+            Task.CompletedTask
 
     /// <summary>
     /// Serializes an object to JSON and writes the output to the body of the HTTP response.
@@ -303,27 +353,26 @@ type HttpContextExtensions() =
     static member WriteHtmlView(ctx: HttpContext, htmlView: #HtmlElement) =
         let cancellationToken = ctx.RequestAborted
         cancellationToken.ThrowIfCancellationRequested()
-        let memoryStream = recyclableMemoryStreamManager.Value.GetStream()
+        let memoryStream = PooledBufferStream.Rent()
         ctx.Response.ContentType <- "text/html; charset=utf-8"
-        if ctx.Request.Method <> HttpMethods.Head then
-            task {
+        task {
+            try
+                // renders like Render.toHtmlDocStreamAsync, but encodes straight into the pooled buffer
+                let sb = Tools.StringBuilderPool.Get()
                 try
-                    do! Render.toHtmlDocStreamAsync(memoryStream, htmlView, cancellationToken)
-                    ctx.Response.ContentLength <- memoryStream.Length
-                    memoryStream.Seek(0, SeekOrigin.Begin) |> ignore
-                    return! memoryStream.CopyToAsync(ctx.Response.Body, cancellationToken)
+                    sb.AppendLine("<!DOCTYPE html>") |> ignore
+                    htmlView.Render sb
+                    HtmlWriting.encodeStrictUtf8 sb memoryStream
                 finally
-                    memoryStream.Dispose()
-            }
-            :> Task
-        else
-            task {
-                try
-                    do! Render.toHtmlDocStreamAsync(memoryStream, htmlView, cancellationToken)
-                    ctx.Response.ContentLength <- memoryStream.Length
-                finally
-                    memoryStream.Dispose()
-            }
+                    Tools.StringBuilderPool.Return(sb)
+                cancellationToken.ThrowIfCancellationRequested()
+                ctx.Response.ContentLength <- memoryStream.Length
+                if ctx.Request.Method <> HttpMethods.Head then
+                    return! ctx.Response.Body.WriteAsync(memoryStream.WrittenMemory, cancellationToken)
+            finally
+                memoryStream.Return()
+        }
+        :> Task
 
     /// <summary>
     /// <para>Serializes a stream of HTML elements and writes the output to the body of the HTTP response using chunked transfer encoding.</para>
@@ -389,12 +438,22 @@ type HttpContextExtensions() =
     [<Extension>]
     static member BindJson<'T>(ctx: HttpContext) =
         let serializer = ctx.GetJsonSerializer()
-        task {
+        let deserialized =
             try
-                return! serializer.Deserialize<'T>(ctx)
-            with ex when not(ex :? OperationCanceledException) ->
-                return raise <| ModelBindException("Unable to deserialize model from JSON", ex)
-        }
+                serializer.Deserialize<'T>(ctx)
+            with ex ->
+                // handled below exactly like an asynchronous failure
+                Task.FromException<'T> ex
+        if deserialized.IsCompletedSuccessfully then
+            // nothing to wrap: hand out the completed task instead of allocating another one
+            deserialized
+        else
+            task {
+                try
+                    return! deserialized
+                with ex when not(ex :? OperationCanceledException) ->
+                    return raise <| ModelBindException("Unable to deserialize model from JSON", ex)
+            }
 
     /// <summary>
     /// Parses all input elements from an HTML form into an object of type 'T.

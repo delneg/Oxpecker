@@ -67,7 +67,12 @@ module RouteTemplateBuilder =
     let inline parse (c: char) (modifier: string option) (s: string) : obj =
         try
             match c with
-            | 's' -> s.Replace("%2F", "/", StringComparison.OrdinalIgnoreCase)
+            | 's' ->
+                // the vectorized char search is much cheaper than a case-insensitive substring search
+                if s.Contains('%') then
+                    s.Replace("%2F", "/", StringComparison.OrdinalIgnoreCase)
+                else
+                    s
             | 'i' -> int s |> boxv
             | 'b' -> bool.Parse s |> boxv
             | 'c' -> char s[0] |> boxv
@@ -132,9 +137,9 @@ module RoutingInternal =
             | MultiEndpoint(endpoints, configure) ->
                 MultiEndpoint(Seq.map (fun e -> AddFilter.Compose(filterMiddleware, e)) endpoints, configure)
 
-    let private getArgByIndex (routeData: RouteData) (mappings: (string * char * Option<_>) array) (index: int) =
+    let private getArgByIndex (routeValues: RouteValueDictionary) (mappings: (string * char * Option<_>) array) (index: int) =
         let placeholderName, formatChar, modifier = mappings[index]
-        let routeValue = routeData.Values[placeholderName] |> string
+        let routeValue = routeValues[placeholderName] |> string
         RouteTemplateBuilder.parse formatChar modifier routeValue
 
     let private invokeHandler<'T>
@@ -144,28 +149,29 @@ module RoutingInternal =
         (mappings: (string * char * Option<_>) array)
         (ctxInParameterList: bool)
         =
-        let routeData = ctx.GetRouteData()
+        // Request.RouteValues is what GetRouteData() wraps, without allocating a RouteData per request
+        let routeValues = ctx.Request.RouteValues
         if ctxInParameterList then
             match mappings.Length with
             | 0 -> invoker.Invoke(handler, ctx)
             | 1 ->
-                let arg = getArgByIndex routeData mappings 0
+                let arg = getArgByIndex routeValues mappings 0
                 invoker.Invoke(handler, arg, ctx)
             | 2 ->
-                let arg1 = getArgByIndex routeData mappings 0
-                let arg2 = getArgByIndex routeData mappings 1
+                let arg1 = getArgByIndex routeValues mappings 0
+                let arg2 = getArgByIndex routeValues mappings 1
                 invoker.Invoke(handler, arg1, arg2, ctx)
             | 3 ->
-                let arg1 = getArgByIndex routeData mappings 0
-                let arg2 = getArgByIndex routeData mappings 1
-                let arg3 = getArgByIndex routeData mappings 2
+                let arg1 = getArgByIndex routeValues mappings 0
+                let arg2 = getArgByIndex routeValues mappings 1
+                let arg3 = getArgByIndex routeValues mappings 2
                 invoker.Invoke(handler, arg1, arg2, arg3, ctx)
             | _ ->
                 invoker.Invoke(
                     handler,
                     Span [|
                         for placeholderName, formatChar, modifier in mappings do
-                            let routeValue = routeData.Values[placeholderName] |> string
+                            let routeValue = routeValues[placeholderName] |> string
                             RouteTemplateBuilder.parse formatChar modifier routeValue
                         ctx
                     |]
@@ -173,14 +179,26 @@ module RoutingInternal =
             |> nonNull
             :?> Task
         else
-            invoker.Invoke(
-                handler,
-                Span [|
-                    for placeholderName, formatChar, modifier in mappings do
-                        let routeValue = routeData.Values[placeholderName] |> string
-                        RouteTemplateBuilder.parse formatChar modifier routeValue
-                |]
-            )
+            match mappings.Length with
+            | 1 -> invoker.Invoke(handler, getArgByIndex routeValues mappings 0)
+            | 2 ->
+                let arg1 = getArgByIndex routeValues mappings 0
+                let arg2 = getArgByIndex routeValues mappings 1
+                invoker.Invoke(handler, arg1, arg2)
+            | 3 ->
+                let arg1 = getArgByIndex routeValues mappings 0
+                let arg2 = getArgByIndex routeValues mappings 1
+                let arg3 = getArgByIndex routeValues mappings 2
+                invoker.Invoke(handler, arg1, arg2, arg3)
+            | _ ->
+                invoker.Invoke(
+                    handler,
+                    Span [|
+                        for placeholderName, formatChar, modifier in mappings do
+                            let routeValue = routeValues[placeholderName] |> string
+                            RouteTemplateBuilder.parse formatChar modifier routeValue
+                    |]
+                )
             |> nonNull
             :?> FSharpFunc<HttpContext, Task>
             <| ctx
@@ -239,20 +257,20 @@ module RoutingInternal =
             null
 
     let private invokeFactory (ctx: HttpContext) (info: RoutefInfo) (factory: obj) =
-        let routeData = ctx.GetRouteData()
+        let routeValues = ctx.Request.RouteValues
         let mappings = info.Mappings
         match mappings.Length with
-        | 1 -> info.Invoker.Invoke(factory, getArgByIndex routeData mappings 0)
+        | 1 -> info.Invoker.Invoke(factory, getArgByIndex routeValues mappings 0)
         | 2 ->
-            let arg1 = getArgByIndex routeData mappings 0
-            let arg2 = getArgByIndex routeData mappings 1
+            let arg1 = getArgByIndex routeValues mappings 0
+            let arg2 = getArgByIndex routeValues mappings 1
             info.Invoker.Invoke(factory, arg1, arg2)
         | 3 ->
-            let arg1 = getArgByIndex routeData mappings 0
-            let arg2 = getArgByIndex routeData mappings 1
-            let arg3 = getArgByIndex routeData mappings 2
+            let arg1 = getArgByIndex routeValues mappings 0
+            let arg2 = getArgByIndex routeValues mappings 1
+            let arg3 = getArgByIndex routeValues mappings 2
             info.Invoker.Invoke(factory, arg1, arg2, arg3)
-        | _ -> info.Invoker.Invoke(factory, Span(Array.init mappings.Length (getArgByIndex routeData mappings)))
+        | _ -> info.Invoker.Invoke(factory, Span(Array.init mappings.Length (getArgByIndex routeValues mappings)))
         |> nonNull
         :?> Endpoint seq
 
