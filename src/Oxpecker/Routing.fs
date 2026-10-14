@@ -67,7 +67,12 @@ module RouteTemplateBuilder =
     let inline parse (c: char) (modifier: string option) (s: string) : obj =
         try
             match c with
-            | 's' -> s.Replace("%2F", "/", StringComparison.OrdinalIgnoreCase)
+            | 's' ->
+                // the vectorized char search is much cheaper than a case-insensitive substring search
+                if s.Contains('%') then
+                    s.Replace("%2F", "/", StringComparison.OrdinalIgnoreCase)
+                else
+                    s
             | 'i' -> int s |> boxv
             | 'b' -> bool.Parse s |> boxv
             | 'c' -> char s[0] |> boxv
