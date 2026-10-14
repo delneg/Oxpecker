@@ -17,6 +17,20 @@ open Microsoft.Extensions.Logging
 open Microsoft.Net.Http.Headers
 open Oxpecker.ViewEngine
 
+module internal HtmlWriting =
+    // the encoding a StreamWriter uses by default: UTF-8 without BOM that throws on invalid surrogates
+    let private strictUtf8 = UTF8Encoding(false, true)
+
+    /// Encodes the builder into the writer with the same bytes and errors as a default StreamWriter,
+    /// without allocating StreamWriter's char and byte buffers
+    let encodeStrictUtf8 (sb: StringBuilder) (writer: IBufferWriter<byte>) =
+        let encoder = strictUtf8.GetEncoder()
+        let mutable bytesUsed = 0L
+        let mutable completed = false
+        for chunk in sb.GetChunks() do
+            encoder.Convert(chunk.Span, writer, false, &bytesUsed, &completed)
+        encoder.Convert(ReadOnlySpan<char>.Empty, writer, true, &bytesUsed, &completed)
+
 type RouteParseException(message: string, ex) =
     inherit Exception(message, ex)
 
@@ -327,10 +341,20 @@ type HttpContextExtensions() =
         cancellationToken.ThrowIfCancellationRequested()
         let memoryStream = recyclableMemoryStreamManager.Value.GetStream()
         ctx.Response.ContentType <- "text/html; charset=utf-8"
+        // renders like Render.toHtmlDocStreamAsync, but encodes straight into the pooled stream
+        let render () =
+            let sb = Tools.StringBuilderPool.Get()
+            try
+                sb.AppendLine("<!DOCTYPE html>") |> ignore
+                htmlView.Render sb
+                HtmlWriting.encodeStrictUtf8 sb memoryStream
+            finally
+                Tools.StringBuilderPool.Return(sb)
+            cancellationToken.ThrowIfCancellationRequested()
         if ctx.Request.Method <> HttpMethods.Head then
             task {
                 try
-                    do! Render.toHtmlDocStreamAsync(memoryStream, htmlView, cancellationToken)
+                    render ()
                     ctx.Response.ContentLength <- memoryStream.Length
                     memoryStream.Seek(0, SeekOrigin.Begin) |> ignore
                     return! memoryStream.CopyToAsync(ctx.Response.Body, cancellationToken)
@@ -341,7 +365,7 @@ type HttpContextExtensions() =
         else
             task {
                 try
-                    do! Render.toHtmlDocStreamAsync(memoryStream, htmlView, cancellationToken)
+                    render ()
                     ctx.Response.ContentLength <- memoryStream.Length
                 finally
                     memoryStream.Dispose()
