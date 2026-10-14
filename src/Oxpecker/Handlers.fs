@@ -193,10 +193,10 @@ module Default =
         | null -> false
         | feature -> feature.RequestTimeoutToken.IsCancellationRequested
 
-    let exceptionMiddleware (ctx: HttpContext) (next: RequestDelegate) =
+    let private handleExceptions (ctx: HttpContext) (nextTask: Task) =
         task {
             try
-                return! next.Invoke(ctx)
+                return! nextTask
             with ex ->
                 let logger = ctx.GetLogger("Oxpecker.Default.ExceptionMiddleware")
                 match ex with
@@ -243,6 +243,19 @@ module Default =
                     return! ctx.WriteText "Internal server error"
         }
         :> Task
+
+    let exceptionMiddleware (ctx: HttpContext) (next: RequestDelegate) =
+        let nextTask =
+            try
+                next.Invoke(ctx)
+            with ex ->
+                // handled like an asynchronous failure
+                Task.FromException ex
+        if nextTask.IsCompletedSuccessfully then
+            // nothing to handle: skip the task state machine
+            nextTask
+        else
+            handleExceptions ctx nextTask
 
     let notFoundHandler (ctx: HttpContext) =
         let logger = ctx.GetLogger("Oxpecker.Default.NotFoundHandler")
