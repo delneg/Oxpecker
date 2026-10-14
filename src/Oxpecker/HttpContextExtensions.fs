@@ -353,7 +353,7 @@ type HttpContextExtensions() =
     static member WriteHtmlView(ctx: HttpContext, htmlView: #HtmlElement) =
         let cancellationToken = ctx.RequestAborted
         cancellationToken.ThrowIfCancellationRequested()
-        let memoryStream = new PooledBufferStream()
+        let memoryStream = PooledBufferStream.Rent()
         ctx.Response.ContentType <- "text/html; charset=utf-8"
         task {
             try
@@ -370,7 +370,7 @@ type HttpContextExtensions() =
                 if ctx.Request.Method <> HttpMethods.Head then
                     return! ctx.Response.Body.WriteAsync(memoryStream.WrittenMemory, cancellationToken)
             finally
-                memoryStream.Dispose()
+                memoryStream.Return()
         }
         :> Task
 

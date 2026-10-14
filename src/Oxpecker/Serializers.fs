@@ -70,8 +70,11 @@ type SystemTextJsonSerializer(?options: JsonSerializerOptions) =
             else
                 task {
                     // a pooled buffer instead of a RecyclableMemoryStream with its block list per response
-                    use stream = new PooledBufferStream()
-                    return! serializeToStreamWithLength value stream ctx options
+                    let stream = PooledBufferStream.Rent()
+                    try
+                        return! serializeToStreamWithLength value stream ctx options
+                    finally
+                        stream.Return()
                 }
 
         member this.SerializePart(value, writer, cancellationToken) =
