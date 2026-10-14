@@ -17,14 +17,28 @@ open Microsoft.Extensions.Logging
 open Microsoft.Net.Http.Headers
 open Oxpecker.ViewEngine
 
-module internal HtmlWriting =
+type internal StrictUtf8Encoder =
     // the encoding a StreamWriter uses by default: UTF-8 without BOM that throws on invalid surrogates
-    let private strictUtf8 = UTF8Encoding(false, true)
+    static member val private Encoding = UTF8Encoding(false, true)
+    [<ThreadStatic; DefaultValue>]
+    static val mutable private cached: Encoder | null
+    /// One encoder per thread instead of one per response; encoding calls no user code, so it is never shared
+    static member Get() =
+        match StrictUtf8Encoder.cached with
+        | null ->
+            let encoder = StrictUtf8Encoder.Encoding.GetEncoder()
+            StrictUtf8Encoder.cached <- encoder
+            encoder
+        | encoder ->
+            // drops any state left by an encoding that threw
+            encoder.Reset()
+            encoder
 
+module internal HtmlWriting =
     /// Encodes the builder into the writer with the same bytes and errors as a default StreamWriter,
     /// without allocating StreamWriter's char and byte buffers
     let encodeStrictUtf8 (sb: StringBuilder) (writer: IBufferWriter<byte>) =
-        let encoder = strictUtf8.GetEncoder()
+        let encoder = StrictUtf8Encoder.Get()
         let mutable bytesUsed = 0L
         let mutable completed = false
         for chunk in sb.GetChunks() do
