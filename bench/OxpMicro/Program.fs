@@ -82,6 +82,7 @@ let jsonBody = Text.Encoding.UTF8.GetBytes """{"name":"don","age":42}"""
 [<MemoryDiagnoser>]
 type Endpoints() =
     let h = Harness()
+    [<Benchmark>] member _.A0Warmup() = (for _ in 1..4 do h.Run("/plaintext", ""))
     [<Benchmark>] member _.Plaintext() = h.Run("/plaintext", "")
     [<Benchmark>] member _.Json() = h.Run("/json", "")
     [<Benchmark>] member _.JsonUsers() = h.Run("/json-users", "")
@@ -96,6 +97,20 @@ type Endpoints() =
     [<Benchmark>] member _.BindQuery() = h.Run("/bind-query", "?Name=don&Age=42")
     [<Benchmark>] member _.BindForm() = h.Run("POST", "/bind-form", "", "application/x-www-form-urlencoded", formBody)
     [<Benchmark>] member _.BindJson() = h.Run("POST", "/bind-json", "", "application/json", jsonBody)
+
+/// Handler-level benchmarks without the ASP.NET pipeline (reused DefaultHttpContext).
+[<MemoryDiagnoser>]
+type Direct() =
+    let ctx = DefaultHttpContext()
+    let ok = Func<HttpContext, Task>(fun _ -> Task.CompletedTask)
+    let h1: EndpointHandler = fun _ -> Task.CompletedTask
+    let compose2 = h1 >=> h1
+    let compose4 = h1 >=> h1 >=> h1 >=> h1
+    let headers = setStatusCode 200 >=> setHttpHeader "X-Bench" "1" >=> setStatusCode 200
+    [<Benchmark>] member _.A0Warmup() = (for _ in 1..4 do compose4 ctx |> ignore)
+    [<Benchmark>] member _.Compose2() = compose2 ctx
+    [<Benchmark>] member _.Compose4() = compose4 ctx
+    [<Benchmark>] member _.ComposeHeaders() = headers ctx
 
 type AllocListener() =
     inherit Diagnostics.Tracing.EventListener()
