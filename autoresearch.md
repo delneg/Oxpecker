@@ -44,4 +44,14 @@ runtime dependencies. Inspired by "don't create them": pooled buffers, stackallo
   baseline (stale NuGet HTTP cache), so they are not in the checks.
 
 ## What's Been Tried
-(see autoresearch.jsonl; summary updated as we go)
+(full log in autoresearch.jsonl; kept ones are exp/NN branches)
+- 01 routef GetRouteData()->Request.RouteValues (-40 B), 02 fixed-arity Invoke for no-ctx routef (-40 B; based on 01)
+- 03 WriteText pooled buffer (-32..40 B on every text response)
+- 04 WriteHtmlView without StreamWriter (-5.3 KB/html); 06 pooled buffer for html (-240 B; based on 05+04)
+- 05 JSON PooledBufferStream instead of RecyclableMemoryStream (-240 B/json)
+- 07 bindQuery: HttpRequest.Query is QueryCollectionInternal -> pooled dict instead of new Dictionary (-216 B)
+- 08 BindJson returns completed inner task (-72 B)
+- 09 noResponseCaching precomputed header string (-297 B); 10 preconditions without closures (-191 B)
+- 11 Compose sync fast path (CPU only: Compose4 49->27 ns direct; end-to-end within noise)
+- Insights: in-process harness floor is 320 B/call; Kestrel floor ~78 B/req. Timing noise end-to-end ~5-10%,
+  direct BDN ~2%. try/with inside the composed closure changes JIT results (see jsonl 11).
