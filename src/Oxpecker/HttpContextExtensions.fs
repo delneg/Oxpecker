@@ -339,37 +339,26 @@ type HttpContextExtensions() =
     static member WriteHtmlView(ctx: HttpContext, htmlView: #HtmlElement) =
         let cancellationToken = ctx.RequestAborted
         cancellationToken.ThrowIfCancellationRequested()
-        let memoryStream = recyclableMemoryStreamManager.Value.GetStream()
+        let memoryStream = new PooledBufferStream()
         ctx.Response.ContentType <- "text/html; charset=utf-8"
-        // renders like Render.toHtmlDocStreamAsync, but encodes straight into the pooled stream
-        let render () =
-            let sb = Tools.StringBuilderPool.Get()
+        task {
             try
-                sb.AppendLine("<!DOCTYPE html>") |> ignore
-                htmlView.Render sb
-                HtmlWriting.encodeStrictUtf8 sb memoryStream
+                // renders like Render.toHtmlDocStreamAsync, but encodes straight into the pooled buffer
+                let sb = Tools.StringBuilderPool.Get()
+                try
+                    sb.AppendLine("<!DOCTYPE html>") |> ignore
+                    htmlView.Render sb
+                    HtmlWriting.encodeStrictUtf8 sb memoryStream
+                finally
+                    Tools.StringBuilderPool.Return(sb)
+                cancellationToken.ThrowIfCancellationRequested()
+                ctx.Response.ContentLength <- memoryStream.Length
+                if ctx.Request.Method <> HttpMethods.Head then
+                    return! ctx.Response.Body.WriteAsync(memoryStream.WrittenMemory, cancellationToken)
             finally
-                Tools.StringBuilderPool.Return(sb)
-            cancellationToken.ThrowIfCancellationRequested()
-        if ctx.Request.Method <> HttpMethods.Head then
-            task {
-                try
-                    render ()
-                    ctx.Response.ContentLength <- memoryStream.Length
-                    memoryStream.Seek(0, SeekOrigin.Begin) |> ignore
-                    return! memoryStream.CopyToAsync(ctx.Response.Body, cancellationToken)
-                finally
-                    memoryStream.Dispose()
-            }
-            :> Task
-        else
-            task {
-                try
-                    render ()
-                    ctx.Response.ContentLength <- memoryStream.Length
-                finally
-                    memoryStream.Dispose()
-            }
+                memoryStream.Dispose()
+        }
+        :> Task
 
     /// <summary>
     /// <para>Serializes a stream of HTML elements and writes the output to the body of the HTTP response using chunked transfer encoding.</para>
