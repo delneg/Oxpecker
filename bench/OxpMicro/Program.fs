@@ -50,10 +50,19 @@ type Harness() =
         features.Set<IHttpResponseFeature>(resp)
         features.Set<IHttpResponseBodyFeature>(PipeBodyFeature(pipe))
         features.Set<IServiceProvidersFeature>(ServiceProvidersFeature(RequestServices = app.Services))
-    member _.Run(path: string, query: string) =
-        req.Method <- "GET"
+    member this.Run(path: string, query: string) = this.Run("GET", path, query, null, null)
+    member _.Run(method: string, path: string, query: string, contentType: string, body: byte array) =
+        req.Method <- method
         req.Path <- path
         req.QueryString <- query
+        if isNull body then
+            reqHeaders.Remove("Content-Type") |> ignore
+            reqHeaders.ContentLength <- System.Nullable()
+            req.Body <- Stream.Null
+        else
+            reqHeaders["Content-Type"] <- contentType
+            reqHeaders.ContentLength <- int64 body.Length
+            req.Body <- new MemoryStream(body, false)
         resp.StatusCode <- 200
         respHeaders.Clear()
         features.Set<IEndpointFeature>(null)
@@ -67,6 +76,9 @@ type Harness() =
         | true, r -> pipe.Reader.AdvanceTo(r.Buffer.End)
         | _ -> ()
 
+let formBody = Text.Encoding.UTF8.GetBytes "Name=don&Age=42"
+let jsonBody = Text.Encoding.UTF8.GetBytes """{"name":"don","age":42}"""
+
 [<MemoryDiagnoser>]
 type Endpoints() =
     let h = Harness()
@@ -79,6 +91,9 @@ type Endpoints() =
     [<Benchmark>] member _.Composed() = h.Run("/composed", "")
     [<Benchmark>] member _.Html() = h.Run("/html", "")
     [<Benchmark>] member _.SubRoute() = h.Run("/api/users", "")
+    [<Benchmark>] member _.BindQuery() = h.Run("/bind-query", "?Name=don&Age=42")
+    [<Benchmark>] member _.BindForm() = h.Run("POST", "/bind-form", "", "application/x-www-form-urlencoded", formBody)
+    [<Benchmark>] member _.BindJson() = h.Run("POST", "/bind-json", "", "application/json", jsonBody)
 
 type AllocListener() =
     inherit Diagnostics.Tracing.EventListener()
@@ -97,22 +112,33 @@ let main args =
     if args.Length > 1 && args[0] = "--profile" then
         // sampled allocation types (one sample per ~100 KB allocated) for one endpoint
         let h = Harness()
-        let path, query = match args[1] with "headers" -> "/headers", "?q=1" | "user" -> "/user/don/42", "" | "ctx" -> "/userctx/don/42", "" | "subroute" -> "/api/users", "" | p -> "/" + p, ""
-        for _ in 1..20000 do h.Run(path, query)
+        let path, query = match args[1] with "headers" -> "/headers", "?q=1" | "user" -> "/user/don/42", "" | "ctx" -> "/userctx/don/42", "" | "subroute" -> "/api/users", "" | "bind-query" -> "/bind-query", "?Name=don&Age=42" | p -> "/" + p, ""
+        let run () =
+            match args[1] with
+            | "bind-form" -> h.Run("POST", path, query, "application/x-www-form-urlencoded", formBody)
+            | "bind-json" -> h.Run("POST", path, query, "application/json", jsonBody)
+            | _ -> h.Run(path, query)
+        for _ in 1..20000 do run ()
         use l = new AllocListener()
-        for _ in 1..2000000 do h.Run(path, query)
+        for _ in 1..2000000 do run ()
         for KeyValue(k, v) in l.Counts |> Seq.sortByDescending (fun kv -> kv.Value) |> Seq.truncate 25 do printfn "%8d %s" v k
         exit 0
     if args.Length > 0 && args[0] = "--alloc" then
         // deterministic allocated bytes per call, no BDN
         let h = Harness()
         let cases = [ "plaintext","/plaintext",""; "json","/json",""; "json-users","/json-users",""; "user","/user/don/42","";
-                      "ctx","/userctx/don/42",""; "headers","/headers","?q=1"; "composed","/composed",""; "html","/html",""; "subroute","/api/users","" ]
+                      "ctx","/userctx/don/42",""; "headers","/headers","?q=1"; "composed","/composed",""; "html","/html",""; "subroute","/api/users","";
+                      "bind-query","/bind-query","?Name=don&Age=42"; "bind-form","/bind-form",""; "bind-json","/bind-json","" ]
+        let run name p q =
+            match name with
+            | "bind-form" -> h.Run("POST", p, q, "application/x-www-form-urlencoded", formBody)
+            | "bind-json" -> h.Run("POST", p, q, "application/json", jsonBody)
+            | _ -> h.Run(p, q)
         for name, p, q in cases do
-            for _ in 1..20000 do h.Run(p, q)
+            for _ in 1..20000 do run name p q
             let n = 20000
             let a0 = GC.GetAllocatedBytesForCurrentThread()
-            for _ in 1..n do h.Run(p, q)
+            for _ in 1..n do run name p q
             let a1 = GC.GetAllocatedBytesForCurrentThread()
             printfn "MICRO %s alloc_per_call=%.1f" name (float (a1 - a0) / float n)
         0
