@@ -42,6 +42,8 @@ let endpoints = [
         route "/headers" headerQuery
         route "/composed" (setStatusCode 200 >=> setHttpHeader "X-Bench" "1" >=> text "composed")
         route "/html" <| htmlView (page "World")
+        route "/nocache" (noResponseCaching >=> text "nocache")
+        route "/precond" (validatePreconditions (Some(createETag "v1")) (Some(DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero))) >=> text "precond")
     ]
     GET [ route "/bind-query" <| bindQuery<Person>(fun p -> text p.Name) ]
     POST [

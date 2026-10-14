@@ -91,6 +91,8 @@ type Endpoints() =
     [<Benchmark>] member _.Composed() = h.Run("/composed", "")
     [<Benchmark>] member _.Html() = h.Run("/html", "")
     [<Benchmark>] member _.SubRoute() = h.Run("/api/users", "")
+    [<Benchmark>] member _.NoCache() = h.Run("/nocache", "")
+    [<Benchmark>] member _.Precond() = h.Run("/precond", "")
     [<Benchmark>] member _.BindQuery() = h.Run("/bind-query", "?Name=don&Age=42")
     [<Benchmark>] member _.BindForm() = h.Run("POST", "/bind-form", "", "application/x-www-form-urlencoded", formBody)
     [<Benchmark>] member _.BindJson() = h.Run("POST", "/bind-json", "", "application/json", jsonBody)
@@ -128,7 +130,7 @@ let main args =
         let h = Harness()
         let cases = [ "plaintext","/plaintext",""; "json","/json",""; "json-users","/json-users",""; "user","/user/don/42","";
                       "ctx","/userctx/don/42",""; "headers","/headers","?q=1"; "composed","/composed",""; "html","/html",""; "subroute","/api/users","";
-                      "bind-query","/bind-query","?Name=don&Age=42"; "bind-form","/bind-form",""; "bind-json","/bind-json","" ]
+                      "bind-query","/bind-query","?Name=don&Age=42"; "bind-form","/bind-form",""; "bind-json","/bind-json",""; "nocache","/nocache",""; "precond","/precond","" ]
         let run name p q =
             match name with
             | "bind-form" -> h.Run("POST", p, q, "application/x-www-form-urlencoded", formBody)
