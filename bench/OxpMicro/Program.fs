@@ -108,10 +108,12 @@ type Direct() =
     let compose2 = h1 >=> h1
     let compose4 = h1 >=> h1 >=> h1 >=> h1
     let headers = setStatusCode 200 >=> setHttpHeader "X-Bench" "1" >=> setStatusCode 200
+    let nextOk = RequestDelegate(fun _ -> Task.CompletedTask)
     [<Benchmark>] member _.A0Warmup() = (for _ in 1..4 do compose4 ctx |> ignore)
     [<Benchmark>] member _.Compose2() = compose2 ctx
     [<Benchmark>] member _.Compose4() = compose4 ctx
     [<Benchmark>] member _.ComposeHeaders() = headers ctx
+    [<Benchmark>] member _.ExceptionMiddleware() = Default.exceptionMiddleware ctx nextOk
 
 /// Oxpecker's routef request delegate alone, with route values already set (as routing would).
 [<MemoryDiagnoser>]
