@@ -174,14 +174,26 @@ module RoutingInternal =
             |> nonNull
             :?> Task
         else
-            invoker.Invoke(
-                handler,
-                Span [|
-                    for placeholderName, formatChar, modifier in mappings do
-                        let routeValue = routeValues[placeholderName] |> string
-                        RouteTemplateBuilder.parse formatChar modifier routeValue
-                |]
-            )
+            match mappings.Length with
+            | 1 -> invoker.Invoke(handler, getArgByIndex routeValues mappings 0)
+            | 2 ->
+                let arg1 = getArgByIndex routeValues mappings 0
+                let arg2 = getArgByIndex routeValues mappings 1
+                invoker.Invoke(handler, arg1, arg2)
+            | 3 ->
+                let arg1 = getArgByIndex routeValues mappings 0
+                let arg2 = getArgByIndex routeValues mappings 1
+                let arg3 = getArgByIndex routeValues mappings 2
+                invoker.Invoke(handler, arg1, arg2, arg3)
+            | _ ->
+                invoker.Invoke(
+                    handler,
+                    Span [|
+                        for placeholderName, formatChar, modifier in mappings do
+                            let routeValue = routeValues[placeholderName] |> string
+                            RouteTemplateBuilder.parse formatChar modifier routeValue
+                    |]
+                )
             |> nonNull
             :?> FSharpFunc<HttpContext, Task>
             <| ctx
