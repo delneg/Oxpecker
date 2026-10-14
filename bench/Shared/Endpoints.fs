@@ -50,6 +50,7 @@ let endpoints = [
         route "/bind-form" <| bindForm<Person>(fun p -> text p.Name)
         route "/bind-json" <| bindJson<Person>(fun p -> text p.Name)
     ]
+    subRoutef "/org/{%s}" (fun (org: string) -> [ GET [ route "/info" (text "org info"); route "/other" (text "other") ] ])
     subRoute "/api" [
         GET [ route "/users" <| text "Users received" ]
     ]

@@ -92,6 +92,7 @@ type Endpoints() =
     [<Benchmark>] member _.Composed() = h.Run("/composed", "")
     [<Benchmark>] member _.Html() = h.Run("/html", "")
     [<Benchmark>] member _.SubRoute() = h.Run("/api/users", "")
+    [<Benchmark>] member _.SubRoutef() = h.Run("/org/acme/info", "")
     [<Benchmark>] member _.NoCache() = h.Run("/nocache", "")
     [<Benchmark>] member _.Precond() = h.Run("/precond", "")
     [<Benchmark>] member _.BindQuery() = h.Run("/bind-query", "?Name=don&Age=42")
@@ -112,6 +113,24 @@ type Direct() =
     [<Benchmark>] member _.Compose4() = compose4 ctx
     [<Benchmark>] member _.ComposeHeaders() = headers ctx
 
+/// Oxpecker's routef request delegate alone, with route values already set (as routing would).
+[<MemoryDiagnoser>]
+type DirectRoutef() =
+    let done' : EndpointHandler = fun _ -> Task.CompletedTask
+    let make (template, mappings: (string * char * string option) array, del: EndpointHandler) values =
+        let ctx = DefaultHttpContext()
+        mappings |> Array.iteri (fun i (name, _, _) -> ctx.Request.RouteValues[name] <- (values: string array)[i])
+        ctx, del
+    let ctxS, delS = make (Oxpecker.RoutingInternal.routefInner "/user/{%s}/{%s}" (fun (a: string) (b: string) -> done')) [| "don"; "abc" |]
+    let ctxI, delI = make (Oxpecker.RoutingInternal.routefInner "/user/{%s}/{%i}" (fun (a: string) (b: int) -> done')) [| "don"; "42" |]
+    let ctxC, delC = make (Oxpecker.RoutingInternal.routefInner "/user/{%s}/{%i}" (fun (a: string) (b: int) (c: HttpContext) -> Task.CompletedTask)) [| "don"; "42" |]
+    let ctxG, delG = make (Oxpecker.RoutingInternal.routefInner "/user/{%O:guid}" (fun (a: Guid) -> done')) [| "6f9619ff-8b86-d011-b42d-00c04fc964ff" |]
+    [<Benchmark>] member _.A0Warmup() = (for _ in 1..4 do delI ctxI |> ignore)
+    [<Benchmark>] member _.RoutefStrStr() = delS ctxS
+    [<Benchmark>] member _.RoutefStrInt() = delI ctxI
+    [<Benchmark>] member _.RoutefStrIntCtx() = delC ctxC
+    [<Benchmark>] member _.RoutefGuid() = delG ctxG
+
 type AllocListener() =
     inherit Diagnostics.Tracing.EventListener()
     member val Counts = Collections.Concurrent.ConcurrentDictionary<string, int64>()
@@ -129,7 +148,7 @@ let main args =
     if args.Length > 1 && args[0] = "--profile" then
         // sampled allocation types (one sample per ~100 KB allocated) for one endpoint
         let h = Harness()
-        let path, query = match args[1] with "headers" -> "/headers", "?q=1" | "user" -> "/user/don/42", "" | "ctx" -> "/userctx/don/42", "" | "subroute" -> "/api/users", "" | "bind-query" -> "/bind-query", "?Name=don&Age=42" | p -> "/" + p, ""
+        let path, query = match args[1] with "headers" -> "/headers", "?q=1" | "user" -> "/user/don/42", "" | "ctx" -> "/userctx/don/42", "" | "subroute" -> "/api/users", "" | "subroutef" -> "/org/acme/info", "" | "bind-query" -> "/bind-query", "?Name=don&Age=42" | p -> "/" + p, ""
         let run () =
             match args[1] with
             | "bind-form" -> h.Run("POST", path, query, "application/x-www-form-urlencoded", formBody)
@@ -145,7 +164,7 @@ let main args =
         let h = Harness()
         let cases = [ "plaintext","/plaintext",""; "json","/json",""; "json-users","/json-users",""; "user","/user/don/42","";
                       "ctx","/userctx/don/42",""; "headers","/headers","?q=1"; "composed","/composed",""; "html","/html",""; "subroute","/api/users","";
-                      "bind-query","/bind-query","?Name=don&Age=42"; "bind-form","/bind-form",""; "bind-json","/bind-json",""; "nocache","/nocache",""; "precond","/precond","" ]
+                      "bind-query","/bind-query","?Name=don&Age=42"; "bind-form","/bind-form",""; "bind-json","/bind-json",""; "nocache","/nocache",""; "precond","/precond",""; "subroutef","/org/acme/info","" ]
         let run name p q =
             match name with
             | "bind-form" -> h.Run("POST", p, q, "application/x-www-form-urlencoded", formBody)
