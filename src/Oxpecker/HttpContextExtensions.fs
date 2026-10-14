@@ -1,6 +1,7 @@
 namespace Oxpecker
 
 open System
+open System.Buffers
 open System.Collections.Generic
 open System.IO
 open System.Runtime.CompilerServices
@@ -15,6 +16,20 @@ open Microsoft.Extensions.DependencyInjection
 open Microsoft.Extensions.Logging
 open Microsoft.Net.Http.Headers
 open Oxpecker.ViewEngine
+
+module internal HtmlWriting =
+    // the encoding a StreamWriter uses by default: UTF-8 without BOM that throws on invalid surrogates
+    let private strictUtf8 = UTF8Encoding(false, true)
+
+    /// Encodes the builder into the writer with the same bytes and errors as a default StreamWriter,
+    /// without allocating StreamWriter's char and byte buffers
+    let encodeStrictUtf8 (sb: StringBuilder) (writer: IBufferWriter<byte>) =
+        let encoder = strictUtf8.GetEncoder()
+        let mutable bytesUsed = 0L
+        let mutable completed = false
+        for chunk in sb.GetChunks() do
+            encoder.Convert(chunk.Span, writer, false, &bytesUsed, &completed)
+        encoder.Convert(ReadOnlySpan<char>.Empty, writer, true, &bytesUsed, &completed)
 
 type RouteParseException(message: string, ex) =
     inherit Exception(message, ex)
@@ -303,27 +318,26 @@ type HttpContextExtensions() =
     static member WriteHtmlView(ctx: HttpContext, htmlView: #HtmlElement) =
         let cancellationToken = ctx.RequestAborted
         cancellationToken.ThrowIfCancellationRequested()
-        let memoryStream = recyclableMemoryStreamManager.Value.GetStream()
+        let memoryStream = new PooledBufferStream()
         ctx.Response.ContentType <- "text/html; charset=utf-8"
-        if ctx.Request.Method <> HttpMethods.Head then
-            task {
+        task {
+            try
+                // renders like Render.toHtmlDocStreamAsync, but encodes straight into the pooled buffer
+                let sb = Tools.StringBuilderPool.Get()
                 try
-                    do! Render.toHtmlDocStreamAsync(memoryStream, htmlView, cancellationToken)
-                    ctx.Response.ContentLength <- memoryStream.Length
-                    memoryStream.Seek(0, SeekOrigin.Begin) |> ignore
-                    return! memoryStream.CopyToAsync(ctx.Response.Body, cancellationToken)
+                    sb.AppendLine("<!DOCTYPE html>") |> ignore
+                    htmlView.Render sb
+                    HtmlWriting.encodeStrictUtf8 sb memoryStream
                 finally
-                    memoryStream.Dispose()
-            }
-            :> Task
-        else
-            task {
-                try
-                    do! Render.toHtmlDocStreamAsync(memoryStream, htmlView, cancellationToken)
-                    ctx.Response.ContentLength <- memoryStream.Length
-                finally
-                    memoryStream.Dispose()
-            }
+                    Tools.StringBuilderPool.Return(sb)
+                cancellationToken.ThrowIfCancellationRequested()
+                ctx.Response.ContentLength <- memoryStream.Length
+                if ctx.Request.Method <> HttpMethods.Head then
+                    return! ctx.Response.Body.WriteAsync(memoryStream.WrittenMemory, cancellationToken)
+            finally
+                memoryStream.Dispose()
+        }
+        :> Task
 
     /// <summary>
     /// <para>Serializes a stream of HTML elements and writes the output to the body of the HTTP response using chunked transfer encoding.</para>
