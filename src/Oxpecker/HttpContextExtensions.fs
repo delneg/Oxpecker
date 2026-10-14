@@ -1,6 +1,7 @@
 namespace Oxpecker
 
 open System
+open System.Buffers
 open System.Collections.Generic
 open System.IO
 open System.Runtime.CompilerServices
@@ -264,7 +265,28 @@ type HttpContextExtensions() =
     [<Extension>]
     static member WriteText(ctx: HttpContext, str: string) =
         ctx.SetContentType "text/plain; charset=utf-8"
-        ctx.WriteBytes(Encoding.UTF8.GetBytes str)
+        let byteCount = Encoding.UTF8.GetByteCount str
+        let cancellationToken = ctx.RequestAborted
+        // fail before anything is set or written, also for HEAD, once the request has been aborted
+        cancellationToken.ThrowIfCancellationRequested()
+        ctx.Response.ContentLength <- int64 byteCount
+        if ctx.Request.Method <> HttpMethods.Head then
+            // encode into a pooled buffer instead of allocating a new byte array per response
+            let buffer = ArrayPool<byte>.Shared.Rent byteCount
+            let written = Encoding.UTF8.GetBytes(str, 0, str.Length, buffer, 0)
+            let writeTask = ctx.Response.Body.WriteAsync(buffer, 0, written, cancellationToken)
+            if writeTask.IsCompletedSuccessfully then
+                ArrayPool<byte>.Shared.Return buffer
+                writeTask
+            else
+                task {
+                    try
+                        do! writeTask
+                    finally
+                        ArrayPool<byte>.Shared.Return buffer
+                }
+        else
+            Task.CompletedTask
 
     /// <summary>
     /// Serializes an object to JSON and writes the output to the body of the HTTP response.
