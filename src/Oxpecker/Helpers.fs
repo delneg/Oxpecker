@@ -47,11 +47,26 @@ type internal PooledBufferStream() =
             this.EnsureFree(max sizeHint 1)
             buffer.AsMemory(length)
         member _.Advance(count) = length <- length + count
-    override _.Dispose(disposing: bool) =
+    member private _.Reset() =
         if buffer.Length > 0 then
             ArrayPool<byte>.Shared.Return buffer
         buffer <- Array.Empty<byte>()
         length <- 0
+    override this.Dispose(disposing: bool) = this.Reset()
+    [<ThreadStatic; DefaultValue>]
+    static val mutable private spare: PooledBufferStream | null
+    /// Takes this thread's spare instance, or creates one
+    static member Rent() =
+        match PooledBufferStream.spare with
+        | null -> new PooledBufferStream()
+        | stream ->
+            PooledBufferStream.spare <- null
+            stream
+    /// Gives the buffer back to the pool and keeps the empty instance as the current thread's spare.
+    /// Only call it once the written data is no longer used.
+    member this.Return() =
+        this.Reset()
+        PooledBufferStream.spare <- this
 
 [<AutoOpen>]
 module Helpers =
