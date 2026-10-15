@@ -321,35 +321,59 @@ module RoutingInternal =
         (depth: int)
         (endpoints: Endpoint seq)
         : struct (bool * EndpointHandler voption) =
-        use enumerator = endpoints.GetEnumerator()
         let mutable index = 0
         let mutable isValid = true
         let mutable handler = ValueNone
-        while isValid && enumerator.MoveNext() do
-            if index < shapes.Length then
-                let isOnPath = depth >= 0 && index = indexPath[depth]
-                let childDepth = if isOnPath then depth + 1 else -1
-                match enumerator.Current, shapes[index] with
-                | SimpleEndpoint(verbs, template, endpointHandler, _), SimpleShape(expectedVerbs, expected) when
-                    template = expected && isSameVerbs verbs expectedVerbs
-                    ->
-                    if isOnPath then
-                        handler <- ValueSome endpointHandler
-                | NestedEndpoint(template, children, _), NestedShape(expected, childShapes) when template = expected ->
-                    let struct (isChildValid, childHandler) = tryFindHandler childShapes indexPath childDepth children
-                    isValid <- isChildValid
-                    if isOnPath then
-                        handler <- childHandler
-                | MultiEndpoint(children, _), MultiShape childShapes ->
-                    let struct (isChildValid, childHandler) = tryFindHandler childShapes indexPath childDepth children
-                    isValid <- isChildValid
-                    if isOnPath then
-                        handler <- childHandler
-                | _ -> isValid <- false
-            else
-                isValid <- false
-            index <- index + 1
+        // lists and arrays (what factories and HTTP verb functions return) are walked without an enumerator
+        match endpoints with
+        | :? (Endpoint list) as list ->
+            let mutable rest = list
+            while isValid && not rest.IsEmpty do
+                isValid <- checkEndpoint shapes indexPath depth index rest.Head &handler
+                index <- index + 1
+                rest <- rest.Tail
+        | :? (Endpoint array) as array ->
+            while isValid && index < array.Length do
+                isValid <- checkEndpoint shapes indexPath depth index array[index] &handler
+                index <- index + 1
+        | _ ->
+            use enumerator = endpoints.GetEnumerator()
+            while isValid && enumerator.MoveNext() do
+                isValid <- checkEndpoint shapes indexPath depth index enumerator.Current &handler
+                index <- index + 1
         struct (isValid && index = shapes.Length, handler)
+
+    and private checkEndpoint
+        (shapes: EndpointShape array)
+        (indexPath: int array)
+        (depth: int)
+        (index: int)
+        (endpoint: Endpoint)
+        (handler: byref<EndpointHandler voption>)
+        : bool =
+        if index < shapes.Length then
+            let isOnPath = depth >= 0 && index = indexPath[depth]
+            let childDepth = if isOnPath then depth + 1 else -1
+            match endpoint, shapes[index] with
+            | SimpleEndpoint(verbs, template, endpointHandler, _), SimpleShape(expectedVerbs, expected) when
+                template = expected && isSameVerbs verbs expectedVerbs
+                ->
+                if isOnPath then
+                    handler <- ValueSome endpointHandler
+                true
+            | NestedEndpoint(template, children, _), NestedShape(expected, childShapes) when template = expected ->
+                let struct (isChildValid, childHandler) = tryFindHandler childShapes indexPath childDepth children
+                if isOnPath then
+                    handler <- childHandler
+                isChildValid
+            | MultiEndpoint(children, _), MultiShape childShapes ->
+                let struct (isChildValid, childHandler) = tryFindHandler childShapes indexPath childDepth children
+                if isOnPath then
+                    handler <- childHandler
+                isChildValid
+            | _ -> false
+        else
+            false
 
     // Keeps the structure, templates, verbs and configuration of the endpoints, but replaces handlers with resolvers
     let rec private wrapEndpoints
@@ -421,23 +445,61 @@ module Routers =
             else
                 failwithf $"Http verbs intersect at '%s{routeTemplate}'"
         | NestedEndpoint(handler, endpoints, configure) ->
-            NestedEndpoint(handler, endpoints |> Seq.map(applyHttpVerbsToEndpoint verbs), configure)
+            NestedEndpoint(handler, applyHttpVerbsToSeq verbs endpoints, configure)
+        | MultiEndpoint(endpoints, configure) -> MultiEndpoint(applyHttpVerbsToSeq verbs endpoints, configure)
+
+    // Lists and arrays are mapped once, into an array, so the endpoints are not rebuilt on every enumeration
+    // (subRoutef factories run per request). Other sequences, and collections where verbs intersect, stay lazy,
+    // so their errors are thrown when the endpoints are enumerated, as before.
+    and private applyHttpVerbsToSeq (verbs: HttpVerbs) (endpoints: Endpoint seq) : Endpoint seq =
+        match endpoints with
+        | :? (Endpoint list) as list ->
+            let result = Array.zeroCreate list.Length
+            let mutable rest = list
+            let mutable index = 0
+            let mutable isValid = true
+            while isValid && not rest.IsEmpty do
+                match tryApplyHttpVerbs verbs rest.Head with
+                | ValueSome endpoint ->
+                    result[index] <- endpoint
+                    index <- index + 1
+                    rest <- rest.Tail
+                | ValueNone -> isValid <- false
+            if isValid then
+                result :> Endpoint seq
+            else
+                endpoints |> Seq.map(applyHttpVerbsToEndpoint verbs)
+        | :? (Endpoint array) as array ->
+            let result = Array.zeroCreate array.Length
+            let mutable index = 0
+            let mutable isValid = true
+            while isValid && index < array.Length do
+                match tryApplyHttpVerbs verbs array[index] with
+                | ValueSome endpoint ->
+                    result[index] <- endpoint
+                    index <- index + 1
+                | ValueNone -> isValid <- false
+            if isValid then
+                result :> Endpoint seq
+            else
+                endpoints |> Seq.map(applyHttpVerbsToEndpoint verbs)
+        | _ -> endpoints |> Seq.map(applyHttpVerbsToEndpoint verbs)
+
+    // ValueNone when verbs intersect (the lazy path then throws on enumeration)
+    and private tryApplyHttpVerbs (verbs: HttpVerbs) (endpoint: Endpoint) : Endpoint voption =
+        match endpoint with
+        | SimpleEndpoint(oldVerbs, routeTemplate, handler, configure) ->
+            if oldVerbs = HttpVerbs.Any || oldVerbs = verbs then
+                ValueSome(SimpleEndpoint(verbs, routeTemplate, handler, configure))
+            else
+                ValueNone
+        | NestedEndpoint(template, endpoints, configure) ->
+            ValueSome(NestedEndpoint(template, applyHttpVerbsToSeq verbs endpoints, configure))
         | MultiEndpoint(endpoints, configure) ->
-            MultiEndpoint(endpoints |> Seq.map(applyHttpVerbsToEndpoint verbs), configure)
+            ValueSome(MultiEndpoint(applyHttpVerbsToSeq verbs endpoints, configure))
 
     let rec applyHttpVerbsToEndpoints (verbs: HttpVerbs) (endpoints: Endpoint seq) : Endpoint =
-        endpoints
-        |> Seq.map(function
-            | SimpleEndpoint(oldVerbs, routeTemplate, handler, configure) ->
-                if oldVerbs = HttpVerbs.Any || oldVerbs = verbs then
-                    SimpleEndpoint(verbs, routeTemplate, handler, configure)
-                else
-                    failwithf $"Http verbs intersect at '%s{routeTemplate}'"
-            | NestedEndpoint(template, endpoints, configure) ->
-                NestedEndpoint(template, endpoints |> Seq.map(applyHttpVerbsToEndpoint verbs), configure)
-            | MultiEndpoint(endpoints, configure) ->
-                MultiEndpoint(endpoints |> Seq.map(applyHttpVerbsToEndpoint verbs), configure))
-        |> (fun endpoints -> MultiEndpoint(endpoints, id))
+        MultiEndpoint(applyHttpVerbsToSeq verbs endpoints, id)
 
     let GET_HEAD: Endpoint seq -> Endpoint = applyHttpVerbsToEndpoints(Verbs [ GET; HEAD ])
 

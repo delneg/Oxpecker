@@ -110,6 +110,61 @@ let ``Mixed GET and POST routes are not allowed`` () =
     }
 
 [<Fact>]
+let ``Mixed GET and POST routes in arrays are not allowed`` () =
+    task {
+        let endpoint = GET [| POST [| route "/abc" <| text "Hello World" |] |]
+        do!
+            task { return! WebApp.webAppOneRoute endpoint }
+            |> shouldFailTaskWithMessage "Http verbs intersect at '/abc'"
+    }
+
+[<Fact>]
+let ``Nested verb conflict deep inside a list is reported when the app starts`` () =
+    task {
+        let endpoint =
+            GET [
+                subRoute "/api" [ route "/ok" <| text "ok"; POST [ route "/abc" <| text "x" ] ]
+            ]
+        do!
+            task { return! WebApp.webAppOneRoute endpoint }
+            |> shouldFailTaskWithMessage "Http verbs intersect at '/abc'"
+    }
+
+[<Fact>]
+let ``HTTP verb functions keep other sequences lazy`` () =
+    let mutable evaluations = 0
+    let endpoints =
+        seq {
+            evaluations <- evaluations + 1
+            route "/abc" <| text "Hello World"
+        }
+    let endpoint = GET endpoints
+    evaluations |> shouldEqual 0
+    match endpoint with
+    | MultiEndpoint(children, _) ->
+        children |> Seq.length |> shouldEqual 1
+        children |> Seq.length |> shouldEqual 1
+    | _ -> failwith "MultiEndpoint expected"
+    evaluations |> shouldEqual 2
+
+[<Fact>]
+let ``HTTP verb functions apply verbs to arrays and lists`` () =
+    let verbsOf endpoint =
+        match endpoint with
+        | MultiEndpoint(children, _) ->
+            children
+            |> Seq.map(function
+                | SimpleEndpoint(verbs, _, _, _) -> verbs
+                | _ -> failwith "SimpleEndpoint expected")
+            |> List.ofSeq
+        | _ -> failwith "MultiEndpoint expected"
+    let get = Verbs [ HttpVerb.GET ]
+    GET [| route "/a" <| text "a"; route "/b" <| text "b" |]
+    |> verbsOf
+    |> shouldEqual [ get; get ]
+    GET [ route "/a" <| text "a" ] |> verbsOf |> shouldEqual [ get ]
+
+[<Fact>]
 let ``route: QUERY "/search" returns "foo"`` () =
     task {
         let endpoints = [
