@@ -51,6 +51,58 @@ type RouteParseException(message: string, ex) =
 type ModelBindException(message: string, ex) =
     inherit Exception(message, ex)
 
+/// Oxpecker's singleton services, read from the application's root provider so that a request which needs only
+/// them does not create a request scope. Only a service whose last registration is a singleton is served here
+/// (the same instance RequestServices would return); otherwise callers use RequestServices as before.
+[<Sealed>]
+type internal RootServices(services: IServiceCollection, root: IServiceProvider) =
+    static let isSingleton (services: IServiceCollection) (serviceType: Type) =
+        // GetService returns the last registration
+        let mutable lifetime = ValueNone
+        for descriptor in services do
+            if descriptor.ServiceType = serviceType && not descriptor.IsKeyedService then
+                lifetime <- ValueSome descriptor.Lifetime
+        lifetime = ValueSome ServiceLifetime.Singleton
+    let jsonIsSingleton = isSingleton services typeof<IJsonSerializer>
+    let binderIsSingleton = isSingleton services typeof<IModelBinder>
+    let mutable json: IJsonSerializer | null = null
+    let mutable binder: IModelBinder | null = null
+
+    member _.JsonSerializer: IJsonSerializer | null =
+        match json with
+        | null when jsonIsSingleton ->
+            match root.GetService(typeof<IJsonSerializer>) with
+            | :? IJsonSerializer as s ->
+                json <- s
+                s
+            | _ -> null
+        | s -> s
+
+    member _.ModelBinder: IModelBinder | null =
+        match binder with
+        | null when binderIsSingleton ->
+            match root.GetService(typeof<IModelBinder>) with
+            | :? IModelBinder as b ->
+                binder <- b
+                b
+            | _ -> null
+        | b -> b
+
+    /// The services of the application serving ctx, if ctx has not created its request services yet
+    static member TryGet(ctx: HttpContext) : RootServices | null =
+        match ctx with
+        | :? DefaultHttpContext as defaultContext ->
+            match defaultContext.ServiceScopeFactory with
+            // Microsoft.Extensions.DependencyInjection's root scope factory is the root provider itself
+            | :? IServiceProvider as rootProvider when
+                isNull(box(ctx.Features.Get<Microsoft.AspNetCore.Http.Features.IServiceProvidersFeature>()))
+                ->
+                match rootProvider.GetService(typeof<RootServices>) with
+                | :? RootServices as s -> s
+                | _ -> null
+            | _ -> null
+        | _ -> null
+
 type HttpContextExtensions() =
 
     /// <summary>
@@ -206,12 +258,18 @@ type HttpContextExtensions() =
     static member GetWebHostEnvironment(ctx: HttpContext) = ctx.GetService<IWebHostEnvironment>()
 
     /// <summary>
-    /// Gets an instance of <see cref="Oxpecker.Serializers.IJsonSerializer"/> from the request's service container.
+    /// Gets an instance of <see cref="Oxpecker.IJsonSerializer"/> from the request's service container.
     /// </summary>
     /// <param name="ctx">The current http context object.</param>
-    /// <returns>Returns an instance of <see cref="Oxpecker.Serializers.IJsonSerializer"/>.</returns>
+    /// <returns>Returns an instance of <see cref="Oxpecker.IJsonSerializer"/>.</returns>
     [<Extension>]
-    static member GetJsonSerializer(ctx: HttpContext) : IJsonSerializer = ctx.GetService<IJsonSerializer>()
+    static member GetJsonSerializer(ctx: HttpContext) : IJsonSerializer =
+        match RootServices.TryGet ctx with
+        | null -> ctx.GetService<IJsonSerializer>()
+        | services ->
+            match services.JsonSerializer with
+            | null -> ctx.GetService<IJsonSerializer>()
+            | serializer -> serializer
 
     /// <summary>
     /// Gets an instance of <see cref="Oxpecker.IModelBinder"/> from the request's service container.
@@ -219,7 +277,13 @@ type HttpContextExtensions() =
     /// <param name="ctx">The current http context object.</param>
     /// <returns>Returns an instance of <see cref="Oxpecker.IModelBinder"/>.</returns>
     [<Extension>]
-    static member GetModelBinder(ctx: HttpContext) : IModelBinder = ctx.GetService<IModelBinder>()
+    static member GetModelBinder(ctx: HttpContext) : IModelBinder =
+        match RootServices.TryGet ctx with
+        | null -> ctx.GetService<IModelBinder>()
+        | services ->
+            match services.ModelBinder with
+            | null -> ctx.GetService<IModelBinder>()
+            | binder -> binder
 
     /// <summary>
     /// Gets an instance of <see cref="Microsoft.AspNetCore.Antiforgery.AntiforgeryTokenSet"/> from the request's service container.'
@@ -431,7 +495,7 @@ type HttpContextExtensions() =
     static member Write(ctx: HttpContext, result: #IResult) = result.ExecuteAsync(ctx)
 
     /// <summary>
-    /// Uses the <see cref="Serializers.IJsonSerializer"/> to deserialize the entire body of the <see cref="Microsoft.AspNetCore.Http.HttpRequest"/> asynchronously into an object of type 'T.
+    /// Uses the <see cref="IJsonSerializer"/> to deserialize the entire body of the <see cref="Microsoft.AspNetCore.Http.HttpRequest"/> asynchronously into an object of type 'T.
     /// </summary>
     /// <typeparam name="'T"></typeparam>
     /// <returns>Returns a <see cref="System.Threading.Tasks.Task{T}"/></returns>

@@ -505,3 +505,77 @@ let ``TryGetHeaderValues result cannot be mutated into the header collection`` (
     ctx.TryGetHeaderValues "X-Test"
     |> Option.map List.ofSeq
     |> shouldEqual(Some [ "a"; "bb" ])
+
+let private contextWithServices (configure: IServiceCollection -> unit) =
+    let services = ServiceCollection()
+    services.AddOxpecker() |> ignore
+    configure services
+    let provider = services.BuildServiceProvider()
+    let newContext () =
+        // the way ASP.NET Core's DefaultHttpContextFactory sets up a request
+        DefaultHttpContext(ServiceScopeFactory = provider.GetRequiredService<IServiceScopeFactory>())
+    provider, newContext
+
+[<Fact>]
+let ``GetJsonSerializer and GetModelBinder return the registered singletons without creating request services`` () =
+    let provider, newContext = contextWithServices ignore
+    let ctx = newContext()
+
+    ctx.GetJsonSerializer()
+    |> shouldEqual(provider.GetRequiredService<IJsonSerializer>())
+    ctx.GetModelBinder() |> shouldEqual(provider.GetRequiredService<IModelBinder>())
+    ctx.Features.Get<Microsoft.AspNetCore.Http.Features.IServiceProvidersFeature>()
+    |> isNull
+    |> shouldEqual true
+
+[<Fact>]
+let ``GetJsonSerializer returns a singleton registered after AddOxpecker`` () =
+    let custom = SystemTextJsonSerializer()
+    let _, newContext = contextWithServices(fun services -> services.AddSingleton<IJsonSerializer>(custom) |> ignore)
+
+    newContext().GetJsonSerializer() |> shouldEqual(custom :> IJsonSerializer)
+
+[<Fact>]
+let ``GetJsonSerializer returns the request's instance of a scoped serializer`` () =
+    let _, newContext =
+        contextWithServices(fun services ->
+            services.AddScoped<IJsonSerializer>(fun _ -> SystemTextJsonSerializer() :> IJsonSerializer)
+            |> ignore)
+    let ctx1 = newContext()
+    let ctx2 = newContext()
+
+    let serializer1 = ctx1.GetJsonSerializer()
+    serializer1
+    |> shouldEqual(ctx1.RequestServices.GetRequiredService<IJsonSerializer>())
+    ctx1.GetJsonSerializer() |> shouldEqual serializer1
+    Object.ReferenceEquals(ctx2.GetJsonSerializer(), serializer1)
+    |> shouldEqual false
+
+[<Fact>]
+let ``GetModelBinder returns a new instance of a transient binder`` () =
+    let _, newContext =
+        contextWithServices(fun services ->
+            services.AddTransient<IModelBinder>(fun _ -> ModelBinder() :> IModelBinder)
+            |> ignore)
+    let ctx = newContext()
+
+    Object.ReferenceEquals(ctx.GetModelBinder(), ctx.GetModelBinder())
+    |> shouldEqual false
+
+[<Fact>]
+let ``GetJsonSerializer uses RequestServices set on the context`` () =
+    let _, newContext = contextWithServices ignore
+    let custom = SystemTextJsonSerializer()
+    let other = ServiceCollection().AddSingleton<IJsonSerializer>(custom).BuildServiceProvider()
+    let ctx = newContext()
+    ctx.RequestServices <- other
+
+    ctx.GetJsonSerializer() |> shouldEqual(custom :> IJsonSerializer)
+
+[<Fact>]
+let ``GetJsonSerializer works without AddOxpecker`` () =
+    let custom = SystemTextJsonSerializer()
+    let provider = ServiceCollection().AddSingleton<IJsonSerializer>(custom).BuildServiceProvider()
+    let ctx = DefaultHttpContext(ServiceScopeFactory = provider.GetRequiredService<IServiceScopeFactory>())
+
+    ctx.GetJsonSerializer() |> shouldEqual(custom :> IJsonSerializer)
