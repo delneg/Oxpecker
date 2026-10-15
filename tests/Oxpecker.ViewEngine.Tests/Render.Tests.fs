@@ -470,3 +470,38 @@ let ``Prerendered template allows the hole to be rendered elsewhere first`` () =
     layout() { "dynamic" }
     |> Render.toString
     |> shouldEqual """<div>dynamic</div>"""
+
+[<Fact>]
+let ``Children keep their order for zero, one and many children`` () =
+    let empty = div()
+    empty.Children |> Seq.length |> shouldEqual 0
+    let one = div() { span() }
+    one.Children |> Seq.length |> shouldEqual 1
+    let many =
+        ul() {
+            li() { "a" }
+            li() { "b" }
+            li() { "c" }
+        }
+    many.Children
+    |> Seq.map Render.toString
+    |> List.ofSeq
+    |> shouldEqual [ "<li>a</li>"; "<li>b</li>"; "<li>c</li>" ]
+    many |> Render.toString |> shouldEqual "<ul><li>a</li><li>b</li><li>c</li></ul>"
+    let frag =
+        Fragment() {
+            "x"
+            "y"
+        }
+    frag |> Render.toString |> shouldEqual "xy"
+    frag.Children |> Seq.length |> shouldEqual 2
+
+[<Fact>]
+let ``Children added after a null child keep their order`` () =
+    let node = div()
+    (node :> HtmlContainer).AddChild(Unchecked.defaultof<HtmlElement>)
+    node.AddChild(span())
+    node.Children
+    |> List.ofSeq
+    |> List.map(fun c -> isNull(box c))
+    |> shouldEqual [ true; false ]

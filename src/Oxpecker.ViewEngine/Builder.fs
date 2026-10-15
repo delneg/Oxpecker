@@ -21,6 +21,26 @@ module Builder =
         inherit HtmlElement
         abstract member AddChild: HtmlElement -> unit
 
+    /// Children of a container: the first child is stored inline, so the common single-child case needs no queue item
+    [<Struct>]
+    type internal ChildList =
+        val mutable First: HtmlElement
+        val mutable Rest: CustomQueue<HtmlElement>
+        member this.Add(element: HtmlElement) =
+            // a null element goes to the queue, so the order and contents stay as they were
+            if isNull(box this.First) && isNull this.Rest.Head && isNotNull(box element) then
+                this.First <- element
+            else
+                this.Rest.Enqueue(element)
+        member this.AsEnumerable() =
+            let first = this.First
+            let rest = this.Rest
+            seq {
+                if isNotNull(box first) then
+                    yield first
+                yield! rest.AsEnumerable()
+            }
+
     module internal RenderHelpers =
         let inline renderStartTag (tagName: string) (sb: StringBuilder) (attributes: CustomQueue<HtmlAttribute>) =
             sb.Append('<').Append(tagName) |> ignore
@@ -36,8 +56,11 @@ module Builder =
                 next <- next.Next
             sb.Append('>') |> ignore
 
-        let inline renderChildren (sb: StringBuilder) (children: CustomQueue<HtmlElement>) =
-            let mutable next = children.Head
+        let inline renderChildren (sb: StringBuilder) (children: ChildList) =
+            let first = children.First
+            if isNotNull(box first) then
+                first.Render(sb)
+            let mutable next = children.Rest.Head
             while isNotNull next do
                 let child = next.Value
                 child.Render(sb)
@@ -47,9 +70,9 @@ module Builder =
 
     /// Node with children only (no attributes)
     type FragmentNode() =
-        let mutable children: CustomQueue<HtmlElement> = Unchecked.defaultof<_>
+        let mutable children: ChildList = Unchecked.defaultof<_>
         member this.Children = children.AsEnumerable()
-        member this.AddChild(element: HtmlElement) = children.Enqueue(element)
+        member this.AddChild(element: HtmlElement) = children.Add(element)
         member this.Render(sb: StringBuilder) =
             RenderHelpers.renderChildren sb children
         interface HtmlContainer with
@@ -58,7 +81,7 @@ module Builder =
 
     /// Node with both children and attributes
     type RegularNode(tagName: string) =
-        let mutable children: CustomQueue<HtmlElement> = Unchecked.defaultof<_>
+        let mutable children: ChildList = Unchecked.defaultof<_>
         let mutable attributes: CustomQueue<HtmlAttribute> = Unchecked.defaultof<_>
         member this.Children = children.AsEnumerable()
         member this.Attributes = attributes.AsEnumerable()
@@ -68,7 +91,7 @@ module Builder =
             RenderHelpers.renderChildren sb children
             RenderHelpers.renderEndTag tagName sb
         member this.AddAttribute(attribute: HtmlAttribute) = attributes.Enqueue(attribute)
-        member this.AddChild(element: HtmlElement) = children.Enqueue(element)
+        member this.AddChild(element: HtmlElement) = children.Add(element)
         interface HtmlElement with
             member this.Render sb = this.Render sb
         interface HtmlTag with
@@ -108,9 +131,9 @@ module Builder =
 
     /// Node with a prerendered prefix and suffix around its children
     type PrerenderedNode(prefix: string, suffix: string) =
-        let mutable children: CustomQueue<HtmlElement> = Unchecked.defaultof<_>
+        let mutable children: ChildList = Unchecked.defaultof<_>
         member this.Children = children.AsEnumerable()
-        member this.AddChild(element: HtmlElement) = children.Enqueue(element)
+        member this.AddChild(element: HtmlElement) = children.Add(element)
         member this.Render(sb: StringBuilder) =
             sb.Append(prefix) |> ignore
             RenderHelpers.renderChildren sb children
