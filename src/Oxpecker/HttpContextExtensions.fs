@@ -555,6 +555,15 @@ type HttpContextExtensions() =
     static member BindQuery<'T>(ctx: HttpContext) =
         try
             let binder = ctx.GetModelBinder()
-            binder.Bind<'T> ctx.Request.Query
+            match binder with
+            // Nothing has read Request.Query yet: the default binder parses the query string itself, so the request
+            // does not build the query collection only to have it copied
+            | :? ModelBinder as defaultBinder when
+                ctx :? DefaultHttpContext
+                && binder.GetType() = typeof<ModelBinder>
+                && isNull(box(ctx.Features.Get<Microsoft.AspNetCore.Http.Features.IQueryFeature>()))
+                ->
+                defaultBinder.BindQueryString<'T>(ctx.Request.QueryString.Value)
+            | _ -> binder.Bind<'T> ctx.Request.Query
         with ex ->
             raise <| ModelBindException("Unable to deserialize model from query", ex)

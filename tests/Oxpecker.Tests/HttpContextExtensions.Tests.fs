@@ -579,3 +579,52 @@ let ``GetJsonSerializer works without AddOxpecker`` () =
     let ctx = DefaultHttpContext(ServiceScopeFactory = provider.GetRequiredService<IServiceScopeFactory>())
 
     ctx.GetJsonSerializer() |> shouldEqual(custom :> IJsonSerializer)
+
+type QueryParsingModel = {
+    Name: string | null
+    Tags: string list
+    Age: int option
+    Items: StringCollectionModel array
+}
+
+let private bindQueryOutcome (readQueryFirst: bool) (queryString: string) =
+    let ctx = createContext()
+    ctx.Request.QueryString <- QueryString(queryString)
+    if readQueryFirst then
+        // Request.Query already built: BindQuery binds from the query collection
+        ctx.Request.Query |> ignore
+    try
+        Ok(sprintf "%A" (ctx.BindQuery<QueryParsingModel>()))
+    with ex ->
+        Error(ex.GetType().FullName, ex.Message, (ex.InnerException |> Option.ofObj |> Option.map _.Message))
+
+[<Theory>]
+[<InlineData("")>]
+[<InlineData("?")>]
+[<InlineData("?Name=a")>]
+[<InlineData("?name=a")>]
+[<InlineData("?Name=a&name=b")>]
+[<InlineData("?name=a&Name=b&NAME=c")>]
+[<InlineData("?Tags=1&tags=2&TAGS=3&Tags=4")>]
+[<InlineData("?Tags[0]=x&tags[1]=y&Tags[0]=z")>]
+[<InlineData("?Name=%41%2B+b%20c&Tags=%E2%82%AC")>]
+[<InlineData("?Na%6De=encoded-key&N+ame=space")>]
+[<InlineData("?Name=%zz&Tags=%")>]
+[<InlineData("?=x&Name&Tags&&Age=")>]
+[<InlineData("?&&Name=a&&&Tags=b&")>]
+[<InlineData("?Name=a=b&Tags==")>]
+[<InlineData("?Age=42")>]
+[<InlineData("?age=42&Age=43")>]
+[<InlineData("?Age=abc")>]
+[<InlineData("?Items[0].Tags[0]=a&items[0].tags[1]=b&Items[1].Tags=c")>]
+[<InlineData("?Items.Tags=a&Items[x].Tags=b&Items[99999999999].Tags=c")>]
+[<InlineData("?k1=1&k2=2&k3=3&k4=4&k5=5&k6=6&k7=7&k8=8&k9=9&Name=a&name=b")>]
+[<InlineData("?k1=1&k2=2&k3=3&k4=4&k5=5&k6=6&k7=7&k8=8&k9=9&k10=10&Name=a&name=b")>]
+[<InlineData("?Name=a&k1=1&k2=2&k3=3&k4=4&k5=5&k6=6&k7=7&k8=8&k9=9&name=b")>]
+[<InlineData("?Name=a&k1=1&k2=2&k3=3&k4=4&k5=5&k6=6&k7=7&k8=8&k9=9&k10=10&name=b")>]
+[<InlineData("?Name=a&name=b&k1=1&k2=2&k3=3&k4=4&k5=5&k6=6&k7=7&k8=8&k9=9&k10=10&NAME=c")>]
+[<InlineData("?Tags=a&k1=1&k2=2&k3=3&k4=4&k5=5&k6=6&k7=7&k8=8&k9=9&k10=10&tags=b&TAGS=c")>]
+[<InlineData("?k0=0&k1=1&k2=2&k3=3&k4=4&k5=5&k6=6&k7=7&k8=8&k9=9&k10=10&K3=33&Name=n&name=m&Tags=t")>]
+let ``BindQuery binds the same from the query string as from Request.Query`` (queryString: string) =
+    sprintf "%A" (bindQueryOutcome false queryString)
+    |> shouldEqual(sprintf "%A" (bindQueryOutcome true queryString))

@@ -4,6 +4,7 @@ open System
 open System.Collections.Generic
 open System.Globalization
 open Microsoft.AspNetCore.Http
+open Microsoft.AspNetCore.WebUtilities
 open Microsoft.Extensions.Primitives
 open TypeShape.Core.Utils
 
@@ -47,8 +48,8 @@ module internal RawData =
     let initComplexData data = ComplexData { Offset = 0; Data = data }
 
 [<AbstractClass>]
-type private PooledDictionary<'Key, 'Value when 'Key: not null and 'Key: equality>() =
-    inherit Dictionary<'Key, 'Value>()
+type private PooledDictionary<'Key, 'Value when 'Key: not null and 'Key: equality>(comparer: IEqualityComparer<'Key>) =
+    inherit Dictionary<'Key, 'Value>(comparer)
 
     abstract member Dispose: unit -> unit
 
@@ -65,13 +66,14 @@ module private DictionaryPool =
     /// capacity in the pool for the process lifetime.
     let private maximumRetainedCount = 256
 
-    type private DictionaryPool<'Key, 'Value when 'Key: not null and 'Key: equality>() as that =
+    type private DictionaryPool<'Key, 'Value when 'Key: not null and 'Key: equality>(comparer: IEqualityComparer<'Key>) as that
+        =
         inherit
             DefaultObjectPool<PooledDictionary<'Key, 'Value>>(
                 {
                     new IPooledObjectPolicy<_> with
                         member _.Create() = {
-                            new PooledDictionary<_, _>() with
+                            new PooledDictionary<_, _>(comparer) with
                                 member this.Dispose() = that.Return(this)
                         }
                         member _.Return(dict) =
@@ -84,9 +86,12 @@ module private DictionaryPool =
                 maximumRetained
             )
 
-    let get = DictionaryPool<string, StringValues>().Get
-    let getIndexedValues = DictionaryPool<int, StringValues>().Get
-    let getIndexed = DictionaryPool<int, struct (int * PooledDictionary<string, StringValues>)>().Get
+    let get = DictionaryPool<string, StringValues>(EqualityComparer.Default).Get
+    let getQueryAccumulator =
+        DictionaryPool<string, struct (string * StringValues)>(StringComparer.OrdinalIgnoreCase).Get
+    let getIndexedValues = DictionaryPool<int, StringValues>(EqualityComparer.Default).Get
+    let getIndexed =
+        DictionaryPool<int, struct (int * PooledDictionary<string, StringValues>)>(EqualityComparer.Default).Get
 
 [<AutoOpen>]
 module internal TypeShapeImpl =
@@ -609,3 +614,32 @@ type ModelBinder(?options: ModelBinderOptions) =
                 for KeyValue(key, value) in data do
                     dictionary.Add(key, value)
                 ModelParser.parseModel<'T> cache options (RawData.initComplexData dictionary)
+
+    /// Binds 'T from a raw query string with the same data HttpRequest.Query would give Bind<'T>, without building
+    /// the query collection. Pairs are decoded and merged like ASP.NET Core's QueryFeature: keys case-insensitive,
+    /// in first-seen order, values in order. Key spelling as QueryFeature leaves it: its accumulator stores the
+    /// second occurrence's spelling while it holds at most 10 keys (array storage), else keeps the stored one.
+    member internal _.BindQueryString<'T>(queryString: string | null) : 'T =
+        use accumulated = DictionaryPool.getQueryAccumulator()
+        match queryString with
+        | null
+        | "" -> ()
+        | queryString ->
+            let mutable enumerator = QueryStringEnumerable(queryString).GetEnumerator()
+            while enumerator.MoveNext() do
+                let pair = enumerator.Current
+                let name = pair.DecodeName().ToString()
+                let value = pair.DecodeValue().ToString()
+                match accumulated.TryGetValue name with
+                | true, struct (spelling, values) ->
+                    let spelling =
+                        if values.Count = 1 && accumulated.Count <= 10 then
+                            name
+                        else
+                            spelling
+                    accumulated[name] <- struct (spelling, StringValues.Concat(values, StringValues value))
+                | _ -> accumulated[name] <- struct (name, StringValues value)
+        use dictionary = DictionaryPool.get()
+        for KeyValue(_, struct (key, value)) in accumulated do
+            dictionary.Add(key, value)
+        ModelParser.parseModel<'T> cache options (RawData.initComplexData dictionary)
