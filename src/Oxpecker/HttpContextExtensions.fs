@@ -575,7 +575,12 @@ type HttpContextExtensions() =
     /// <typeparam name="'T"></typeparam>
     /// <returns>Returns a <see cref="System.Threading.Tasks.Task{T}"/></returns>
     [<Extension>]
-    static member BindForm<'T>(ctx: HttpContext) =
+    static member BindForm<'T>(ctx: HttpContext) : Task<'T> =
+        HttpContextExtensions.BindFormValue<'T>(ctx).AsTask()
+
+    /// BindForm without a Task when the form has already been read (or is read synchronously); the same results,
+    /// exceptions (the CSRF one thrown synchronously, the others in the returned task) and cancellation
+    static member internal BindFormValue<'T>(ctx: HttpContext) : ValueTask<'T> =
         let binder = ctx.GetModelBinder()
         // CSRF check
         let feature = ctx.Features.Get<IAntiforgeryValidationFeature>()
@@ -586,13 +591,31 @@ type HttpContextExtensions() =
             | true, _
             | false, Null -> ()
             | false, NonNull err -> ExceptionDispatchInfo.Throw err
-        task {
-            try
-                let! form = ctx.Request.ReadFormAsync(ctx.RequestAborted)
-                return binder.Bind<'T> form
-            with ex when not(ex :? OperationCanceledException) ->
-                return raise <| ModelBindException("Unable to deserialize model from form", ex)
-        }
+        try
+            let form = ctx.Request.ReadFormAsync(ctx.RequestAborted)
+            if form.IsCompletedSuccessfully then
+                ValueTask<'T>(binder.Bind<'T> form.Result)
+            else
+                ValueTask<'T>(
+                    task {
+                        try
+                            let! form = form
+                            return binder.Bind<'T> form
+                        with ex when not(ex :? OperationCanceledException) ->
+                            return raise <| ModelBindException("Unable to deserialize model from form", ex)
+                    }
+                )
+        with ex ->
+            // the task an exception before the first await gave: cancelled for OperationCanceledException, else faulted
+            let thrown = ExceptionDispatchInfo.Capture ex
+            ValueTask<'T>(
+                task {
+                    match ex with
+                    | :? OperationCanceledException -> thrown.Throw()
+                    | _ -> ()
+                    return raise <| ModelBindException("Unable to deserialize model from form", ex)
+                }
+            )
 
     /// <summary>
     /// Parses all parameters of a request's query string into an object of type 'T.

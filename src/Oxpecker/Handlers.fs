@@ -3,6 +3,7 @@ namespace Oxpecker
 
 open System
 open System.Collections.Generic
+open System.Runtime.ExceptionServices
 open System.Threading.Tasks
 open Microsoft.AspNetCore.Antiforgery
 open Microsoft.AspNetCore.Http
@@ -35,10 +36,20 @@ module RequestHandlers =
     /// <returns>An Oxpecker <see cref="EndpointHandler"/> function which can be composed into a bigger web application.</returns>
     let bindForm<'T> (f: 'T -> EndpointHandler) : EndpointHandler =
         fun (ctx: HttpContext) ->
-            task {
-                let! model = ctx.BindForm<'T>()
-                return! f model ctx
-            }
+            try
+                let model = HttpContextExtensions.BindFormValue<'T> ctx
+                if model.IsCompletedSuccessfully then
+                    // no task of our own when the form is already there
+                    f model.Result ctx
+                else
+                    task {
+                        let! model = model
+                        return! f model ctx
+                    }
+            with ex ->
+                // an exception before the first await ends up in the returned task, as it did with task { }
+                let thrown = ExceptionDispatchInfo.Capture ex
+                task { thrown.Throw() }
 
     /// <summary>
     /// Parses a HTTP query string into an instance of type 'T.

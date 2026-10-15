@@ -678,3 +678,78 @@ let ``TryGetQueryValue reads a query collection set on the request`` () =
     ctx.Request.Query <- QueryCollection(Dictionary(dict [ "q", StringValues "set" ]))
 
     ctx.TryGetQueryValue "q" |> shouldEqual(Some "set")
+
+type FormPerson = { Name: string; Age: int }
+
+type private InvalidAntiforgery(error: exn) =
+    interface Microsoft.AspNetCore.Antiforgery.IAntiforgeryValidationFeature with
+        member _.IsValid = false
+        member _.Error = error
+
+[<Fact>]
+let ``bindForm binds the model and leaves Request.Form readable`` () =
+    task {
+        let ctx = createFormContext "Name=don&Age=42"
+        let mutable bound = None
+
+        do!
+            bindForm
+                (fun (p: FormPerson) ->
+                    bound <- Some p
+                    text "ok")
+                ctx
+
+        bound |> shouldEqual(Some { Name = "don"; Age = 42 })
+        ctx.Request.Form["Name"].ToString() |> shouldEqual "don"
+    }
+
+[<Fact>]
+let ``bindForm returns a faulted task when the handler throws`` () =
+    let ctx = createFormContext "Name=don&Age=42"
+
+    let t = bindForm (fun (_: FormPerson) -> failwith "handler failed") ctx
+
+    t.IsFaulted |> shouldEqual true
+    t.Exception.InnerException.Message |> shouldEqual "handler failed"
+
+[<Fact>]
+let ``bindForm returns a task faulted with ModelBindException for an invalid model`` () =
+    let ctx = createFormContext "Name=don&Age=notanumber"
+
+    let t = bindForm (fun (_: FormPerson) -> text "ok") ctx
+
+    t.IsFaulted |> shouldEqual true
+    t.Exception.InnerException :? ModelBindException |> shouldEqual true
+
+[<Fact>]
+let ``BindForm returns a task faulted with ModelBindException for an invalid model`` () =
+    let ctx = createFormContext "Name=don&Age=notanumber"
+
+    let t = ctx.BindForm<FormPerson>()
+
+    t.IsFaulted |> shouldEqual true
+    t.Exception.InnerException :? ModelBindException |> shouldEqual true
+
+[<Fact>]
+let ``CSRF failure: BindForm throws synchronously, bindForm returns a faulted task`` () =
+    let error = InvalidOperationException "csrf"
+    let ctx = createFormContext "Name=don&Age=42"
+    ctx.Features.Set<Microsoft.AspNetCore.Antiforgery.IAntiforgeryValidationFeature>(InvalidAntiforgery error)
+
+    Assert.Throws<InvalidOperationException>(fun () -> ctx.BindForm<FormPerson>() |> ignore)
+    |> shouldEqual error
+    let t = bindForm (fun (_: FormPerson) -> text "ok") ctx
+    t.IsFaulted |> shouldEqual true
+    t.Exception.InnerException |> shouldEqual(error :> exn)
+
+[<Fact>]
+let ``bindForm returns a cancelled task when reading the form is cancelled`` () =
+    let ctx = createFormContext "Name=don&Age=42"
+    use cts = new Threading.CancellationTokenSource()
+    cts.Cancel()
+    ctx.RequestAborted <- cts.Token
+
+    let t = bindForm (fun (_: FormPerson) -> text "ok") ctx
+
+    t.IsCanceled |> shouldEqual true
+    ctx.BindForm<FormPerson>().IsCanceled |> shouldEqual true
