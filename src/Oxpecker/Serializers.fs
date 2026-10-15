@@ -1,5 +1,6 @@
 namespace Oxpecker
 
+open System
 open System.IO
 open System.IO.Pipelines
 open Microsoft.AspNetCore.Http
@@ -86,8 +87,29 @@ type SystemTextJsonSerializer(?options: JsonSerializerOptions) =
             JsonSerializer.SerializeAsync(writer, value, options, cancellationToken)
 
         member this.Deserialize(ctx) =
-            task {
-                match! ctx.Request.ReadFromJsonAsync(options, ctx.RequestAborted) with
-                | null -> return Unchecked.defaultof<_>
-                | v -> return v
-            }
+            let request = ctx.Request
+            // A JSON content type in UTF-8: what HttpRequest.ReadFromJsonAsync does, but reading Request.Body, as ASP.NET
+            // Core does with its Microsoft.AspNetCore.UseStreamBasedJsonParsing switch. In .NET 11 RC 2 the PipeReader
+            // overload of JsonSerializer.DeserializeAsync allocates on every call: PipeReadBufferState.Dispose compares
+            // ReadOnlySequence values with ValueType.Equals (boxing and reflection). Other content types and charsets keep
+            // ReadFromJsonAsync, with its transcoding and errors.
+            let isUtf8Json =
+                match Microsoft.Net.Http.Headers.MediaTypeHeaderValue.TryParse(request.ContentType) with
+                | true, NonNull mediaType ->
+                    (mediaType.MediaType.Equals("application/json", StringComparison.OrdinalIgnoreCase)
+                     || mediaType.Suffix.Equals("json", StringComparison.OrdinalIgnoreCase))
+                    && (not mediaType.Charset.HasValue
+                        || mediaType.Charset.Equals("utf-8", StringComparison.OrdinalIgnoreCase))
+                | _ -> false
+            if isUtf8Json then
+                task {
+                    match! JsonSerializer.DeserializeAsync<'T>(request.Body, options, ctx.RequestAborted) with
+                    | null -> return Unchecked.defaultof<_>
+                    | v -> return v
+                }
+            else
+                task {
+                    match! request.ReadFromJsonAsync(options, ctx.RequestAborted) with
+                    | null -> return Unchecked.defaultof<_>
+                    | v -> return v
+                }

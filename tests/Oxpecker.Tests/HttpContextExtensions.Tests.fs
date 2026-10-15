@@ -710,7 +710,8 @@ let ``bindForm returns a faulted task when the handler throws`` () =
     let t = bindForm (fun (_: FormPerson) -> failwith "handler failed") ctx
 
     t.IsFaulted |> shouldEqual true
-    t.Exception.InnerException.Message |> shouldEqual "handler failed"
+    (nonNull (nonNull t.Exception).InnerException).Message
+    |> shouldEqual "handler failed"
 
 [<Fact>]
 let ``bindForm returns a task faulted with ModelBindException for an invalid model`` () =
@@ -719,7 +720,7 @@ let ``bindForm returns a task faulted with ModelBindException for an invalid mod
     let t = bindForm (fun (_: FormPerson) -> text "ok") ctx
 
     t.IsFaulted |> shouldEqual true
-    t.Exception.InnerException :? ModelBindException |> shouldEqual true
+    (nonNull t.Exception).InnerException :? ModelBindException |> shouldEqual true
 
 [<Fact>]
 let ``BindForm returns a task faulted with ModelBindException for an invalid model`` () =
@@ -728,7 +729,7 @@ let ``BindForm returns a task faulted with ModelBindException for an invalid mod
     let t = ctx.BindForm<FormPerson>()
 
     t.IsFaulted |> shouldEqual true
-    t.Exception.InnerException :? ModelBindException |> shouldEqual true
+    (nonNull t.Exception).InnerException :? ModelBindException |> shouldEqual true
 
 [<Fact>]
 let ``CSRF failure: BindForm throws synchronously, bindForm returns a faulted task`` () =
@@ -740,7 +741,7 @@ let ``CSRF failure: BindForm throws synchronously, bindForm returns a faulted ta
     |> shouldEqual error
     let t = bindForm (fun (_: FormPerson) -> text "ok") ctx
     t.IsFaulted |> shouldEqual true
-    t.Exception.InnerException |> shouldEqual(error :> exn)
+    (nonNull t.Exception).InnerException |> nonNull |> shouldEqual(error :> exn)
 
 [<Fact>]
 let ``bindForm returns a cancelled task when reading the form is cancelled`` () =
@@ -753,3 +754,74 @@ let ``bindForm returns a cancelled task when reading the form is cancelled`` () 
 
     t.IsCanceled |> shouldEqual true
     ctx.BindForm<FormPerson>().IsCanceled |> shouldEqual true
+
+let private jsonOutcome
+    (read: HttpContext -> Threading.Tasks.Task<FormPerson>)
+    (contentType: string)
+    (body: byte array)
+    =
+    task {
+        let ctx = DefaultHttpContext()
+        ctx.Request.Body <- new MemoryStream(body)
+        if not(isNull contentType) then
+            ctx.Request.ContentType <- contentType
+        try
+            let! person = read ctx
+            return sprintf "Ok %A" person
+        with ex ->
+            let rec chain (e: exn | null) =
+                match e with
+                | null -> []
+                | e -> $"{e.GetType().FullName}: {e.Message}" :: chain e.InnerException
+            return sprintf "Error %A" (chain ex)
+    }
+
+let jsonBodies: obj array seq =
+    seq {
+        let utf8 (s: string) = Encoding.UTF8.GetBytes s
+        for contentType in
+            [
+                "application/json"
+                "application/json; charset=utf-8"
+                "Application/JSON; Charset=UTF-8"
+                "application/json; charset=\"utf-8\""
+                "application/problem+json"
+                "application/json; charset=utf-16"
+                "application/json; charset=nope"
+                "text/plain"
+                "not a content type"
+                null
+            ] do
+            for body in
+                [
+                    utf8 """{"name":"don","age":42}"""
+                    Array.append [| 0xEFuy; 0xBBuy; 0xBFuy |] (utf8 """{"name":"bom","age":1}""")
+                    utf8 "null"
+                    utf8 ""
+                    utf8 """{"name":"don","age":42} trailing"""
+                    utf8 """{"name":"don","age":"x"}"""
+                    Encoding.Unicode.GetBytes """{"name":"utf16","age":2}"""
+                ] do
+                [| box contentType; box body |]
+    }
+
+[<Theory>]
+[<MemberData(nameof jsonBodies)>]
+let ``SystemTextJsonSerializer.Deserialize gives what ReadFromJsonAsync gives``
+    (contentType: string, body: byte array)
+    =
+    task {
+        let options = Json.JsonSerializerOptions(Json.JsonSerializerDefaults.Web)
+        let serializer = SystemTextJsonSerializer(options) :> IJsonSerializer
+        let reference (ctx: HttpContext) =
+            task {
+                match! ctx.Request.ReadFromJsonAsync<FormPerson>(options, ctx.RequestAborted) with
+                | null -> return Unchecked.defaultof<_>
+                | v -> return v
+            }
+
+        let! actual = jsonOutcome serializer.Deserialize<FormPerson> contentType body
+        let! expected = jsonOutcome reference contentType body
+
+        actual |> shouldEqual expected
+    }
