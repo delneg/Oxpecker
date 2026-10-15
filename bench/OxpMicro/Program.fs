@@ -173,7 +173,34 @@ let main args =
         for _ in 1..2000000 do run ()
         for KeyValue(k, v) in l.Counts |> Seq.sortByDescending (fun kv -> kv.Value) |> Seq.truncate 25 do printfn "%8d %s" v k
         exit 0
-    if args.Length > 0 && args[0] = "--alloc" then
+    if args.Length > 0 && args[0] = "--time" then
+        // in-process time per call: warm every endpoint 1.5 s (tier-1 + PGO), then per endpoint 0.3 s re-warm + 9 rounds of 40k calls, median ns/call
+        let h = Harness()
+        let cases = [ "plaintext","/plaintext",""; "json","/json",""; "json-users","/json-users",""; "user","/user/don/42","";
+                      "ctx","/userctx/don/42",""; "headers","/headers","?q=1"; "composed","/composed",""; "html","/html",""; "subroute","/api/users","";
+                      "bind-query","/bind-query","?Name=don&Age=42"; "bind-form","/bind-form",""; "bind-json","/bind-json",""; "nocache","/nocache",""; "precond","/precond",""; "subroutef","/org/acme/info",""; "html-dynamic","/html-dynamic","" ]
+        let run name p q =
+            match name with
+            | "bind-form" -> h.Run("POST", p, q, "application/x-www-form-urlencoded", formBody)
+            | "bind-json" -> h.Run("POST", p, q, "application/json", jsonBody)
+            | _ -> h.Run(p, q)
+        let warm ms name p q =
+            let sw = Diagnostics.Stopwatch.StartNew()
+            while sw.ElapsedMilliseconds < ms do
+                for _ in 1..1000 do run name p q
+        for name, p, q in cases do warm 1500L name p q
+        for name, p, q in cases do
+            warm 300L name p q
+            let n = 40000
+            let rounds =
+                [| for _ in 1..9 do
+                       let t0 = Diagnostics.Stopwatch.GetTimestamp()
+                       for _ in 1..n do run name p q
+                       let t1 = Diagnostics.Stopwatch.GetTimestamp()
+                       float (t1 - t0) * 1e9 / float Diagnostics.Stopwatch.Frequency / float n |] |> Array.sort
+            printfn "MICRO %s ns_per_call=%.1f" name rounds[4]
+        0
+    elif args.Length > 0 && args[0] = "--alloc" then
         // deterministic allocated bytes per call, no BDN
         let h = Harness()
         let cases = [ "plaintext","/plaintext",""; "json","/json",""; "json-users","/json-users",""; "user","/user/don/42","";

@@ -1,11 +1,9 @@
 #!/bin/bash
-# Builds the Kestrel bench server and prints METRIC lines (allocation is deterministic, +-2 B/req).
-# Usage: ./autoresearch.sh [cpu: all|1] [seconds per endpoint] [endpoints...]
+# Runs on the Mac: syncs this worktree to wsl26:~/oxp-1015 and runs the benchmark there.
+# stdout: METRIC lines only. stderr: build errors and per-endpoint details.
 set -euo pipefail
 cd "$(dirname "$0")"
-export DOTNET_ROOT=$HOME/.dotnet-oxpecker PATH=$HOME/.dotnet-oxpecker:$PATH DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1
-CPU=${1:-all}; DUR=${2:-3}; [ $# -ge 2 ] && shift 2 || shift $#
-out=$(dotnet build bench/OxpBench/OxpBench.fsproj -c Release 2>&1) || { echo "$out" | grep " error " | sort -u | head -20; exit 1; }
-OUT=$(bench/measure.sh "$CPU" "$DUR" "$@")
-echo "$OUT" >&2
-echo "$OUT" | awk '{ep=$1; for(i=3;i<=NF;i++){split($i,kv,"="); if(kv[1]=="alloc_per_req"){print "METRIC alloc_" ep "=" kv[2]; t+=kv[2]} if(kv[1]=="cpu_us_per_req") print "METRIC cpuus_" ep "=" kv[2]; if(kv[1]=="rps") print "METRIC rps_" ep "=" kv[2]}} END {print "METRIC alloc_total=" t}'
+ssh -o ConnectTimeout=15 -o BatchMode=yes wsl26 true 2>/dev/null || { ssh -o BatchMode=yes win 'wsl -d Ubuntu-26.04 -- true' >/dev/null 2>&1 || true; sleep 10; }
+rsync -a --delete --exclude .git --exclude bin --exclude obj --exclude BenchmarkDotNet.Artifacts --exclude node_modules \
+  --exclude /experiments --exclude /autoresearch.jsonl ./ wsl26:oxp-1015/
+ssh -o BatchMode=yes wsl26 "bash -lc 'cd ~/oxp-1015 && bash bench/ar-bench.sh ${1:-3}'"
