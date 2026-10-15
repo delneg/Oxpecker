@@ -1066,3 +1066,50 @@ let ``routeGroup: HTTP group inside route group `` () =
         resultString |> shouldEqual "api root"
         values.ToArray() |> shouldEqual [| "111"; "222" |]
     }
+
+let private routefTypesEndpoints = [
+    GET [
+        routef "/t/b/{%b}" (fun (v: bool) -> text $"%b{v}")
+        routef "/t/c/{%c}" (fun (v: char) -> text $"%c{v}")
+        routef "/t/d/{%d}" (fun (v: int64) -> text $"%d{v}")
+        routef "/t/f/{%f}" (fun (v: float) -> text(v.ToString(Globalization.CultureInfo.InvariantCulture)))
+        routef "/t/i/{%i}" (fun (v: int) -> text $"%i{v}")
+        routef "/t/o/{%O}" (fun (v: obj) -> text $"{v.GetType().Name}:{v}")
+        routef "/t/og/{%O:guid}" (fun (v: obj) -> text $"{v.GetType().Name}:{v}")
+        routef "/t/three/{%s}/{%i}/{%O:guid}" (fun (s: string) (i: int) (g: Guid) -> text $"{s}|{i}|{g}")
+        routef "/t/ctx/{%s}/{%i}" (fun (s: string) (i: int) (ctx: HttpContext) -> ctx.WriteText $"{s}|{i}")
+        routef "/t/four/{%i}/{%i}/{%i}/{%i}" (fun a b c d -> text $"{a + b + c + d}")
+        routef
+            "/t/prebuilt/{%i}"
+            (let handlers = Array.init 3 (fun i -> text $"prebuilt{i}")
+             fun (i: int) -> handlers[i])
+    ]
+]
+
+[<Theory>]
+[<InlineData("/t/b/true", 200, "true")>]
+[<InlineData("/t/b/False", 200, "false")>]
+[<InlineData("/t/b/yes", 400, "Invalid request")>]
+[<InlineData("/t/c/x", 200, "x")>]
+[<InlineData("/t/d/9999999999", 200, "9999999999")>]
+[<InlineData("/t/d/zz", 400, "Invalid request")>]
+[<InlineData("/t/f/1.5", 200, "1.5")>]
+[<InlineData("/t/f/x", 400, "Invalid request")>]
+[<InlineData("/t/i/0x1F", 200, "31")>]
+[<InlineData("/t/i/2147483648", 500, "Internal server error")>]
+[<InlineData("/t/o/abc", 200, "String:abc")>]
+[<InlineData("/t/og/2a6c9185-95d9-4d8c-80a6-575f99c2a716", 200, "Guid:2a6c9185-95d9-4d8c-80a6-575f99c2a716")>]
+[<InlineData("/t/three/a%2Fb/7/2a6c9185-95d9-4d8c-80a6-575f99c2a716", 200, "a/b|7|2a6c9185-95d9-4d8c-80a6-575f99c2a716")>]
+[<InlineData("/t/ctx/x/3", 200, "x|3")>]
+[<InlineData("/t/four/1/2/3/4", 200, "10")>]
+[<InlineData("/t/prebuilt/2", 200, "prebuilt2")>]
+let ``routef: format types, argument counts and handler shapes`` (path: string, status: int, body: string) =
+    task {
+        use! server = WebApp.webAppWithDefaultErrorHandler routefTypesEndpoints
+        let client = server.GetTestClient()
+
+        let! result = client.GetAsync(path)
+        let! resultString = result.Content.ReadAsStringAsync()
+
+        (int result.StatusCode, resultString) |> shouldEqual(status, body)
+    }

@@ -207,6 +207,156 @@ module RoutingInternal =
             :?> FSharpFunc<HttpContext, Task>
             <| ctx
 
+    /// routef handlers called with typed arguments: segments parsed exactly like RouteTemplateBuilder.parse but
+    /// without boxing, and the curried handler applied with InvokeFast instead of reflection
+    [<AbstractClass; Sealed>]
+    type private TypedRoutef =
+        static member inline private Invalid (s: string) (ex: exn) : 'a =
+            raise
+            <| RouteParseException($"Url segment value '%s{s}' has invalid format", ex)
+
+        /// null when parse would not give an 'A for this format (the handler then keeps the reflection path)
+        static member Parser<'A>(formatChar: char, modifier: string option) : Func<string, 'A> | null =
+            let typed (parser: Func<string, 'P>) : Func<string, 'A> | null = unbox(box parser)
+            let t = typeof<'A>
+            if t = typeof<obj> then
+                typed(Func<string, obj>(fun s -> RouteTemplateBuilder.parse formatChar modifier s))
+            else
+                match formatChar, modifier with
+                | 'i', _ when t = typeof<int> ->
+                    typed(
+                        Func<string, int>(fun s ->
+                            try
+                                int s
+                            with :? FormatException as ex ->
+                                TypedRoutef.Invalid s ex)
+                    )
+                | 'b', _ when t = typeof<bool> ->
+                    typed(
+                        Func<string, bool>(fun s ->
+                            try
+                                bool.Parse s
+                            with :? FormatException as ex ->
+                                TypedRoutef.Invalid s ex)
+                    )
+                | 'c', _ when t = typeof<char> ->
+                    typed(
+                        Func<string, char>(fun s ->
+                            try
+                                char s[0]
+                            with :? FormatException as ex ->
+                                TypedRoutef.Invalid s ex)
+                    )
+                | 'd', _ when t = typeof<int64> ->
+                    typed(
+                        Func<string, int64>(fun s ->
+                            try
+                                int64 s
+                            with :? FormatException as ex ->
+                                TypedRoutef.Invalid s ex)
+                    )
+                | 'f', _ when t = typeof<float> ->
+                    typed(
+                        Func<string, float>(fun s ->
+                            try
+                                float s
+                            with :? FormatException as ex ->
+                                TypedRoutef.Invalid s ex)
+                    )
+                | 'u', _ when t = typeof<uint64> ->
+                    typed(
+                        Func<string, uint64>(fun s ->
+                            try
+                                uint64 s
+                            with :? FormatException as ex ->
+                                TypedRoutef.Invalid s ex)
+                    )
+                | 'O', Some "guid" when t = typeof<Guid> ->
+                    typed(
+                        Func<string, Guid>(fun s ->
+                            try
+                                Guid.Parse s
+                            with :? FormatException as ex ->
+                                TypedRoutef.Invalid s ex)
+                    )
+                | ('i' | 'b' | 'c' | 'd' | 'f' | 'u'), _
+                | 'O', Some "guid" -> null
+                | _ when t = typeof<string> ->
+                    typed(Func<string, string>(fun s -> RouteTemplateBuilder.parse formatChar modifier s :?> string))
+                | _ -> null
+
+        static member private Value (ctx: HttpContext) (name: string) = ctx.Request.RouteValues[name] |> string
+
+        static member Make1<'A>(handler: obj, mappings: (string * char * string option) array) =
+            let name1, c1, m1 = mappings[0]
+            match TypedRoutef.Parser<'A>(c1, m1) with
+            | null -> null
+            | p1 ->
+                let f: 'A -> HttpContext -> Task = unbox handler
+                Func<HttpContext, Task>(fun ctx ->
+                    let routeValues = ctx.Request.RouteValues
+                    f (p1.Invoke(routeValues[name1] |> string)) ctx)
+
+        static member Make2<'A, 'B>(handler: obj, mappings: (string * char * string option) array) =
+            let name1, c1, m1 = mappings[0]
+            let name2, c2, m2 = mappings[1]
+            match TypedRoutef.Parser<'A>(c1, m1), TypedRoutef.Parser<'B>(c2, m2) with
+            | null, _
+            | _, null -> null
+            | p1, p2 ->
+                let f: 'A -> 'B -> HttpContext -> Task = unbox handler
+                Func<HttpContext, Task>(fun ctx ->
+                    let routeValues = ctx.Request.RouteValues
+                    let a = p1.Invoke(routeValues[name1] |> string)
+                    let b = p2.Invoke(routeValues[name2] |> string)
+                    f a b ctx)
+
+        static member Make3<'A, 'B, 'C>(handler: obj, mappings: (string * char * string option) array) =
+            let name1, c1, m1 = mappings[0]
+            let name2, c2, m2 = mappings[1]
+            let name3, c3, m3 = mappings[2]
+            match TypedRoutef.Parser<'A>(c1, m1), TypedRoutef.Parser<'B>(c2, m2), TypedRoutef.Parser<'C>(c3, m3) with
+            | null, _, _
+            | _, null, _
+            | _, _, null -> null
+            | p1, p2, p3 ->
+                let f: 'A -> 'B -> 'C -> HttpContext -> Task = unbox handler
+                Func<HttpContext, Task>(fun ctx ->
+                    let routeValues = ctx.Request.RouteValues
+                    let a = p1.Invoke(routeValues[name1] |> string)
+                    let b = p2.Invoke(routeValues[name2] |> string)
+                    let c = p3.Invoke(routeValues[name3] |> string)
+                    f a b c ctx)
+
+        /// A typed request delegate for a handler of type handlerType with 1 to 3 route arguments, else null
+        static member TryCreate
+            (handlerType: Type, handler: obj | null, mappings: (string * char * string option) array)
+            : Func<HttpContext, Task> | null =
+            let rec domains (t: Type) n =
+                if n = 0 then
+                    if t = typeof<EndpointHandler> then Some [] else None
+                elif Reflection.FSharpType.IsFunction t then
+                    let domain, range = Reflection.FSharpType.GetFunctionElements t
+                    domains range (n - 1) |> Option.map(fun rest -> domain :: rest)
+                else
+                    None
+            if mappings.Length < 1 || mappings.Length > 3 then
+                null
+            else
+                match domains handlerType mappings.Length with
+                | Some argTypes ->
+                    let make =
+                        typeof<TypedRoutef>
+                            .GetMethod(
+                                $"Make{mappings.Length}",
+                                BindingFlags.Public ||| BindingFlags.NonPublic ||| BindingFlags.Static
+                            )
+                        |> nonNull
+                    match make.MakeGenericMethod(Array.ofList argTypes).Invoke(null, [| handler; box mappings |]) with
+                    | :? Func<HttpContext, Task> as typed -> typed
+                    | _ -> null
+                | None -> null
+
     [<NoEquality; NoComparison>]
     type private RoutefInfo = {
         Template: RouteTemplate
@@ -245,8 +395,12 @@ module RoutingInternal =
                 false
             else
                 failwith <| "Unsupported routef handler: " + path.Value
+        let typed = TypedRoutef.TryCreate(typeof<'T>, box handler, info.Mappings)
         let requestDelegate =
-            fun (ctx: HttpContext) -> invokeHandler<'T> ctx info.Invoker handler info.Mappings ctxInParameterList
+            fun (ctx: HttpContext) ->
+                match typed with
+                | null -> invokeHandler<'T> ctx info.Invoker handler info.Mappings ctxInParameterList
+                | typed -> typed.Invoke ctx
 
         info.Template, info.Mappings, requestDelegate
 
