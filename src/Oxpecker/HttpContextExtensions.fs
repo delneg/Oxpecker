@@ -14,6 +14,7 @@ open Microsoft.AspNetCore.Http
 open Microsoft.AspNetCore.Http.Extensions
 open Microsoft.Extensions.DependencyInjection
 open Microsoft.Extensions.Logging
+open Microsoft.Extensions.Primitives
 open Microsoft.Net.Http.Headers
 open Oxpecker.ViewEngine
 
@@ -103,6 +104,46 @@ type internal RootServices(services: IServiceCollection, root: IServiceProvider)
             | _ -> null
         | _ -> null
 
+module internal QueryLookup =
+    open Microsoft.AspNetCore.WebUtilities
+
+    /// The values of key as Request.Query would give them, read from the query string without building the query
+    /// collection: ValueNone when the caller must use Request.Query (something already built it, or the context
+    /// is not a DefaultHttpContext); ValueSome(true, values) when found; ValueSome(false, _) when absent.
+    /// Pairs are decoded and matched like ASP.NET Core's QueryFeature: names case-insensitive, values in order.
+    let tryScan (ctx: HttpContext) (key: string) : struct (bool * StringValues) voption =
+        if
+            isNull(box key)
+            || not(ctx :? DefaultHttpContext)
+            || not(isNull(box(ctx.Features.Get<Microsoft.AspNetCore.Http.Features.IQueryFeature>())))
+        then
+            ValueNone
+        else
+            match ctx.Request.QueryString.Value with
+            | null
+            | "" -> ValueSome(struct (false, StringValues.Empty))
+            | queryString ->
+                let mutable found = false
+                let mutable values = StringValues.Empty
+                let mutable enumerator = QueryStringEnumerable(queryString).GetEnumerator()
+                while enumerator.MoveNext() do
+                    let pair = enumerator.Current
+                    if
+                        MemoryExtensions.Equals(
+                            pair.DecodeName().Span,
+                            key.AsSpan(),
+                            StringComparison.OrdinalIgnoreCase
+                        )
+                    then
+                        let value = pair.DecodeValue().ToString()
+                        values <-
+                            if found then
+                                StringValues.Concat(values, StringValues value)
+                            else
+                                StringValues value
+                        found <- true
+                ValueSome(struct (found, values))
+
 type HttpContextExtensions() =
 
     /// <summary>
@@ -170,9 +211,13 @@ type HttpContextExtensions() =
     /// <returns>Returns Some string if the parameter was present in the request's query string, otherwise returns None.</returns>
     [<Extension>]
     static member TryGetQueryValue(ctx: HttpContext, key: string) =
-        match ctx.Request.Query.TryGetValue key with
-        | true, value -> value.ToString() |> Some
-        | _ -> None
+        match QueryLookup.tryScan ctx key with
+        | ValueSome(struct (true, value)) -> value.ToString() |> Some
+        | ValueSome _ -> None
+        | ValueNone ->
+            match ctx.Request.Query.TryGetValue key with
+            | true, value -> value.ToString() |> Some
+            | _ -> None
 
     /// <summary>
     /// Tries to get the string seq value of a query string parameter from the request.
@@ -182,11 +227,15 @@ type HttpContextExtensions() =
     /// <returns>Returns Some string seq if the parameter was present in the request's query string, otherwise returns None.</returns>
     [<Extension>]
     static member TryGetQueryValues(ctx: HttpContext, key: string) =
-        match ctx.Request.Query.TryGetValue key with
-        // StringValues is immutable and never holds null entries, so it can be handed out
-        // directly as a string seq instead of paying for a Seq.map wrapper
-        | true, value -> Some(boxv value :?> string seq)
-        | _ -> None
+        match QueryLookup.tryScan ctx key with
+        | ValueSome(struct (true, value)) -> Some(boxv value :?> string seq)
+        | ValueSome _ -> None
+        | ValueNone ->
+            match ctx.Request.Query.TryGetValue key with
+            // StringValues is immutable and never holds null entries, so it can be handed out
+            // directly as a string seq instead of paying for a Seq.map wrapper
+            | true, value -> Some(boxv value :?> string seq)
+            | _ -> None
 
     /// <summary>
     /// Tries to get the <see cref="System.String"/> value of a form parameter from the request.

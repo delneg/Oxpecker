@@ -628,3 +628,53 @@ let private bindQueryOutcome (readQueryFirst: bool) (queryString: string) =
 let ``BindQuery binds the same from the query string as from Request.Query`` (queryString: string) =
     sprintf "%A" (bindQueryOutcome false queryString)
     |> shouldEqual(sprintf "%A" (bindQueryOutcome true queryString))
+
+let private queryValueOutcome (readQueryFirst: bool) (queryString: string) (key: string) =
+    let ctx = createContext()
+    ctx.Request.QueryString <- QueryString(queryString)
+    if readQueryFirst then
+        // Request.Query already built: the lookups read the query collection
+        ctx.Request.Query |> ignore
+    let value = ctx.TryGetQueryValue key
+    let values = ctx.TryGetQueryValues key |> Option.map List.ofSeq
+    sprintf "%A %A" value values
+
+[<Theory>]
+[<InlineData("", "q")>]
+[<InlineData("?", "q")>]
+[<InlineData("?q=1", "q")>]
+[<InlineData("?q=1", "Q")>]
+[<InlineData("?Q=1&q=2&x=3&q=4", "q")>]
+[<InlineData("?q", "q")>]
+[<InlineData("?q=", "q")>]
+[<InlineData("?q=a,b&q=c", "q")>]
+[<InlineData("?=x&q=1", "")>]
+[<InlineData("?a=1", "")>]
+[<InlineData("?%71=enc&q+x=sp&q%20x=pct", "q")>]
+[<InlineData("?%71=enc&q+x=sp&q%20x=pct", "q x")>]
+[<InlineData("?q=%E2%82%AC+%2B%zz", "q")>]
+[<InlineData("?&&q=1&&", "q")>]
+[<InlineData("?q=1", "missing")>]
+[<InlineData("?k%C3%A9y=1&K%C3%89Y=2", "kéy")>]
+let ``TryGetQueryValue and TryGetQueryValues return the same as from Request.Query``
+    (queryString: string, key: string)
+    =
+    queryValueOutcome false queryString key
+    |> shouldEqual(queryValueOutcome true queryString key)
+
+[<Fact>]
+let ``TryGetQueryValue does not build Request.Query`` () =
+    let ctx = createContext()
+    ctx.Request.QueryString <- QueryString("?q=1")
+
+    ctx.TryGetQueryValue "q" |> shouldEqual(Some "1")
+    ctx.Features.Get<Microsoft.AspNetCore.Http.Features.IQueryFeature>()
+    |> isNull
+    |> shouldEqual true
+
+[<Fact>]
+let ``TryGetQueryValue reads a query collection set on the request`` () =
+    let ctx = createContext()
+    ctx.Request.Query <- QueryCollection(Dictionary(dict [ "q", StringValues "set" ]))
+
+    ctx.TryGetQueryValue "q" |> shouldEqual(Some "set")
