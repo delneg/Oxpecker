@@ -34,11 +34,11 @@ ms() { awk -v v="$1" 'BEGIN { if (v ~ /us$/) { sub(/us/,"",v); print v/1000 } el
 
 kestrel() { # mode
   local MODE=$1 PORT ENVS SCPU WCPU THREADS CONNS
-  if [ "$MODE" = cpu1 ]; then PORT=5101; ENVS=(DOTNET_PROCESSOR_COUNT=1 DOTNET_gcServer=0); SCPU=2; WCPU=8-11; THREADS=1; CONNS=16
-  else PORT=5104; ENVS=(DOTNET_gcServer=1); SCPU=0,2,4,6; WCPU=8-11; THREADS=4; CONNS=64; fi
+  if [ "$MODE" = cpu1 ]; then PORT=47101; ENVS=(DOTNET_PROCESSOR_COUNT=1 DOTNET_gcServer=0); SCPU=2; WCPU=8-11; THREADS=1; CONNS=16
+  else PORT=47104; ENVS=(DOTNET_gcServer=1); SCPU=0,2,4,6; WCPU=8-11; THREADS=4; CONNS=64; fi
   env "${ENVS[@]}" BENCH_PORT=$PORT taskset -c $SCPU dotnet "$BDLL" >/tmp/oxpbench-$MODE.log 2>&1 &
   local PID=$!
-  for i in $(seq 1 100); do curl -s -o /dev/null "http://127.0.0.1:$PORT/__stats" && break; sleep 0.2; done
+  for i in $(seq 1 100); do curl -s -o /dev/null "http://127.0.0.1:$PORT/__stats" && break; kill -0 $PID 2>/dev/null || { echo "SERVER_DIED $MODE" >&2; tail -n 3 /tmp/oxpbench-$MODE.log >&2; exit 1; }; sleep 0.2; done
   for ep in $EPS; do # global warm-up: every endpoint 1 s, so tiering of shared code is done before any measurement
     taskset -c $WCPU wrk -t$THREADS -c$CONNS -d1s -s "$(lua $ep)" "http://127.0.0.1:$PORT$(url $ep)" >/dev/null
   done
