@@ -137,7 +137,11 @@ module RoutingInternal =
             | MultiEndpoint(endpoints, configure) ->
                 MultiEndpoint(Seq.map (fun e -> AddFilter.Compose(filterMiddleware, e)) endpoints, configure)
 
-    let private getArgByIndex (routeValues: RouteValueDictionary) (mappings: (string * char * Option<_>) array) (index: int) =
+    let private getArgByIndex
+        (routeValues: RouteValueDictionary)
+        (mappings: (string * char * Option<_>) array)
+        (index: int)
+        =
         let placeholderName, formatChar, modifier = mappings[index]
         let routeValue = routeValues[placeholderName] |> string
         RouteTemplateBuilder.parse formatChar modifier routeValue

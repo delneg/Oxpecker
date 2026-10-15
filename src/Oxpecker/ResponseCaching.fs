@@ -9,8 +9,7 @@ module ResponseCaching =
     open Microsoft.AspNetCore.ResponseCaching
 
     // what the typed CacheControl setter writes (ToString of the value), computed once instead of per response
-    let private noCacheHeaderValue =
-        CacheControlHeaderValue(NoCache = true, NoStore = true).ToString()
+    let private noCacheHeaderValue = CacheControlHeaderValue(NoCache = true, NoStore = true).ToString()
 
     /// <summary>
     /// Enables (or suppresses) response caching by clients and proxy servers.

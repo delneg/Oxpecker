@@ -45,7 +45,12 @@ type IJsonSerializer =
 type SystemTextJsonSerializer(?options: JsonSerializerOptions) =
     let options = defaultArg options <| JsonSerializerOptions(JsonSerializerDefaults.Web)
 
-    let serializeToStreamWithLength value (stream: PooledBufferStream) (ctx: HttpContext) (options: JsonSerializerOptions) =
+    let serializeToStreamWithLength
+        value
+        (stream: PooledBufferStream)
+        (ctx: HttpContext)
+        (options: JsonSerializerOptions)
+        =
         ctx.RequestAborted.ThrowIfCancellationRequested()
         JsonSerializer.Serialize(stream, value, options)
         ctx.Response.ContentType <- "application/json; charset=utf-8"

@@ -18,8 +18,7 @@ module CoreInternal =
     let inline compose_opImpl (_: ^OpImpl) left right =
         ((^OpImpl or ^left): (static member Compose: ^left * ^right -> ^right) (left, right))
     // A synchronous throw becomes a failed task (canceled for OperationCanceledException), as it did inside the task builder
-    let private failedTask (ex: exn) : Task =
-        task { ExceptionDispatchInfo.Throw ex }
+    let private failedTask (ex: exn) : Task = task { ExceptionDispatchInfo.Throw ex }
 
     type Composition =
         static member Compose(handler1: EndpointHandler, handler2: EndpointHandler) : EndpointHandler =
