@@ -227,7 +227,8 @@ module Builder =
         member inline _.For(values: #seq<'T>, [<InlineIfLambda>] body: 'T -> HtmlContainerFun) : HtmlContainerFun =
             fun builder ->
                 for value in values do
-                    body value builder
+                    let f = body value
+                    f builder
 
         member inline _.Yield(element: #HtmlElement) : HtmlContainerFun = _.AddChild(element)
 
