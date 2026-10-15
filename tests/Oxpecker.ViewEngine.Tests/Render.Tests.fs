@@ -505,3 +505,35 @@ let ``Children added after a null child keep their order`` () =
     |> List.ofSeq
     |> List.map(fun c -> isNull(box c))
     |> shouldEqual [ true; false ]
+
+[<Fact>]
+let ``Attributes keep their order for zero, one and many attributes`` () =
+    div() |> Render.toString |> shouldEqual "<div></div>"
+    let one = div(id = "a")
+    one.Attributes |> Seq.length |> shouldEqual 1
+    one |> Render.toString |> shouldEqual """<div id="a"></div>"""
+    let many = input(id = "i", class' = "c").bool("disabled", true).attr("data-x", "1")
+    many.Attributes
+    |> Seq.map _.Name
+    |> List.ofSeq
+    |> shouldEqual [ "id"; "class"; "disabled"; "data-x" ]
+    many
+    |> Render.toString
+    |> shouldEqual """<input id="i" class="c" disabled data-x="1">"""
+    let boolFirst = div().bool("hidden", true).attr("id", "x")
+    boolFirst |> Render.toString |> shouldEqual """<div hidden id="x"></div>"""
+
+[<Fact>]
+let ``Attributes added after a null-named attribute keep their order`` () =
+    let node = div()
+    node.AddAttribute(
+        {
+            Name = Unchecked.defaultof<string>
+            Value = "v"
+        }
+    )
+    node.AddAttribute({ Name = "id"; Value = "x" })
+    node.Attributes
+    |> Seq.map(fun a -> isNull(box a.Name))
+    |> List.ofSeq
+    |> shouldEqual [ true; false ]

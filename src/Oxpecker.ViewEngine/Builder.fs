@@ -41,18 +41,46 @@ module Builder =
                 yield! rest.AsEnumerable()
             }
 
+    /// Attributes of a tag: the first attribute is stored inline, so the common single-attribute case needs no queue item
+    [<Struct>]
+    type internal AttributeList =
+        val mutable First: HtmlAttribute
+        val mutable Rest: CustomQueue<HtmlAttribute>
+        member this.Add(attribute: HtmlAttribute) =
+            // an attribute with a null name goes to the queue, so the order and contents stay as they were
+            if
+                isNull(box this.First.Name)
+                && isNull this.Rest.Head
+                && isNotNull(box attribute.Name)
+            then
+                this.First <- attribute
+            else
+                this.Rest.Enqueue(attribute)
+        member this.AsEnumerable() =
+            let first = this.First
+            let rest = this.Rest
+            seq {
+                if isNotNull(box first.Name) then
+                    yield first
+                yield! rest.AsEnumerable()
+            }
+
     module internal RenderHelpers =
-        let inline renderStartTag (tagName: string) (sb: StringBuilder) (attributes: CustomQueue<HtmlAttribute>) =
+        let inline renderAttribute (sb: StringBuilder) (attr: HtmlAttribute) =
+            if isNull attr.Value then
+                sb.Append(' ').Append(attr.Name) |> ignore
+            else
+                sb.Append(' ').Append(attr.Name).Append("=\"") |> ignore
+                sb |> CustomWebUtility.htmlEncode attr.Value
+                sb.Append('"') |> ignore
+
+        let inline renderStartTag (tagName: string) (sb: StringBuilder) (attributes: AttributeList) =
             sb.Append('<').Append(tagName) |> ignore
-            let mutable next = attributes.Head
+            if isNotNull(box attributes.First.Name) then
+                renderAttribute sb attributes.First
+            let mutable next = attributes.Rest.Head
             while isNotNull next do
-                let attr = next.Value
-                if isNull attr.Value then
-                    sb.Append(' ').Append(attr.Name) |> ignore
-                else
-                    sb.Append(' ').Append(attr.Name).Append("=\"") |> ignore
-                    sb |> CustomWebUtility.htmlEncode attr.Value
-                    sb.Append('"') |> ignore
+                renderAttribute sb next.Value
                 next <- next.Next
             sb.Append('>') |> ignore
 
@@ -82,7 +110,7 @@ module Builder =
     /// Node with both children and attributes
     type RegularNode(tagName: string) =
         let mutable children: ChildList = Unchecked.defaultof<_>
-        let mutable attributes: CustomQueue<HtmlAttribute> = Unchecked.defaultof<_>
+        let mutable attributes: AttributeList = Unchecked.defaultof<_>
         member this.Children = children.AsEnumerable()
         member this.Attributes = attributes.AsEnumerable()
         member this.TagName = tagName
@@ -90,7 +118,7 @@ module Builder =
             RenderHelpers.renderStartTag tagName sb attributes
             RenderHelpers.renderChildren sb children
             RenderHelpers.renderEndTag tagName sb
-        member this.AddAttribute(attribute: HtmlAttribute) = attributes.Enqueue(attribute)
+        member this.AddAttribute(attribute: HtmlAttribute) = attributes.Add(attribute)
         member this.AddChild(element: HtmlElement) = children.Add(element)
         interface HtmlElement with
             member this.Render sb = this.Render sb
@@ -101,11 +129,11 @@ module Builder =
 
     /// Node with attributes only (no children)
     type VoidNode(tagName: string) =
-        let mutable attributes: CustomQueue<HtmlAttribute> = Unchecked.defaultof<_>
+        let mutable attributes: AttributeList = Unchecked.defaultof<_>
         member this.Attributes = attributes.AsEnumerable()
         member this.Render(sb: StringBuilder) =
             RenderHelpers.renderStartTag tagName sb attributes
-        member this.AddAttribute(attribute: HtmlAttribute) = attributes.Enqueue(attribute)
+        member this.AddAttribute(attribute: HtmlAttribute) = attributes.Add(attribute)
         member this.TagName = tagName
         interface HtmlTag with
             member this.Render sb = this.Render sb
