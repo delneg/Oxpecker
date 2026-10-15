@@ -1,19 +1,21 @@
 #!/bin/bash
 # Runs ON wsl26 (Ryzen 9 7900X3D, 12 cores / 24 threads, WSL2). Prints METRIC lines on stdout, details on stderr.
-# Kestrel: server pinned to CCD0 cores, wrk pinned to CCD1 cores, keep-alive, 16 endpoints.
-#   cpu1: DOTNET_PROCESSOR_COUNT=1, workstation GC, server on cpu 2, wrk 1 thread 16 conns on cpus 12-15.
-#   cpu4: server GC, server on cpus 2,4,6,8 (4 physical cores), wrk 4 threads 64 conns on cpus 12-19.
+# Everything stays on CPUs 0-11 (12-23 belong to another agent's load tests). SMT pairs are 0+1, 2+3, ...
+# Kestrel keep-alive, 16 endpoints.
+#   cpu1: DOTNET_PROCESSOR_COUNT=1, workstation GC, server on cpu 2, wrk 1 thread 16 conns on cpus 8-11.
+#   cpu4: server GC, server on cpus 0,2,4,6 (4 physical cores), wrk 4 threads 64 conns on cpus 8-11.
 # In-process (OxpMicro): exact allocated bytes per call (cpu 10) and median ns per call (cpus 10,11: one core + its SMT sibling
 # so the background JIT does not share the measured thread's core).
 # Usage: bench/ar-bench.sh [seconds per endpoint, default 3]
 set -euo pipefail
+[ -z "${OXP_PINNED:-}" ] && exec env OXP_PINNED=1 taskset -c 0-11 bash "$0" "$@"
 cd "$(dirname "$0")/.."
 export DOTNET_ROOT=$HOME/.dotnet PATH=$HOME/.dotnet:$PATH DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1
 DUR=${1:-3}
 EPS="plaintext json json-users user ctx headers composed html subroute bind-query bind-form bind-json nocache precond subroutef html-dynamic"
 tfm() { grep -o '<TargetFramework>[^<]*' "$1" | sed 's/.*>//'; }
 for p in bench/OxpBench/OxpBench.fsproj bench/OxpMicro/OxpMicro.fsproj; do
-  out=$(dotnet build "$p" -c Release 2>&1) || { echo "$out" | grep -E " error " | sort -u | head -20 >&2; echo "BUILD FAIL $p" >&2; exit 1; }
+  out=$(taskset -c 0-11 dotnet build "$p" -c Release 2>&1) || { echo "$out" | grep -E " error " | sort -u | head -20 >&2; echo "BUILD FAIL $p" >&2; exit 1; }
 done
 BDLL=bench/OxpBench/bin/Release/$(tfm bench/OxpBench/OxpBench.fsproj)/OxpBench.dll
 MDLL=bench/OxpMicro/bin/Release/$(tfm bench/OxpMicro/OxpMicro.fsproj)/OxpMicro.dll
@@ -32,8 +34,8 @@ ms() { awk -v v="$1" 'BEGIN { if (v ~ /us$/) { sub(/us/,"",v); print v/1000 } el
 
 kestrel() { # mode
   local MODE=$1 PORT ENVS SCPU WCPU THREADS CONNS
-  if [ "$MODE" = cpu1 ]; then PORT=5101; ENVS=(DOTNET_PROCESSOR_COUNT=1 DOTNET_gcServer=0); SCPU=2; WCPU=12-15; THREADS=1; CONNS=16
-  else PORT=5104; ENVS=(DOTNET_gcServer=1); SCPU=2,4,6,8; WCPU=12-19; THREADS=4; CONNS=64; fi
+  if [ "$MODE" = cpu1 ]; then PORT=5101; ENVS=(DOTNET_PROCESSOR_COUNT=1 DOTNET_gcServer=0); SCPU=2; WCPU=8-11; THREADS=1; CONNS=16
+  else PORT=5104; ENVS=(DOTNET_gcServer=1); SCPU=0,2,4,6; WCPU=8-11; THREADS=4; CONNS=64; fi
   env "${ENVS[@]}" BENCH_PORT=$PORT taskset -c $SCPU dotnet "$BDLL" >/tmp/oxpbench-$MODE.log 2>&1 &
   local PID=$!
   for i in $(seq 1 100); do curl -s -o /dev/null "http://127.0.0.1:$PORT/__stats" && break; sleep 0.2; done

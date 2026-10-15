@@ -1,4 +1,5 @@
 #!/bin/bash
+# All remote work is pinned to CPUs 0-11 (12-23 belong to another agent).
 # Interleaved in-process timing, incumbent commit (A) vs working tree (B), both built and run on wsl26.
 # Usage: ./ab.sh <incumbent-commit> [rounds, default 3]
 # stdout: one line per endpoint "AB <ep> A=<median ns> B=<median ns> d=<B/A-1 %> spreadA=<max-min %>", then AB total.
@@ -9,7 +10,7 @@ EX=(--exclude .git --exclude bin --exclude obj --exclude BenchmarkDotNet.Artifac
 rsync -a --delete "${EX[@]}" ./ wsl26:oxp-1015/
 T=$(mktemp -d /tmp/oxp-ab-src.XXXXXX); git archive "$BASE" | tar -x -C "$T"
 rsync -a --delete "${EX[@]}" "$T"/ wsl26:oxp-ab/; rm -rf "$T"
-ssh -T -o BatchMode=yes wsl26 "bash -lc 'set -e; export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1
+ssh -T -o BatchMode=yes wsl26 "taskset -c 0-11 bash -lc 'set -e; export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1
   for d in oxp-ab oxp-1015; do (cd ~/\$d && dotnet build bench/OxpMicro/OxpMicro.fsproj -c Release >/tmp/ab-build-\$d.log 2>&1) || { grep \" error \" /tmp/ab-build-\$d.log | sort -u | head; exit 1; }; done
   tfm=\$(grep -o \"<TargetFramework>[^<]*\" ~/oxp-1015/bench/OxpMicro/OxpMicro.fsproj | sed \"s/.*>//\")
   tfa=\$(grep -o \"<TargetFramework>[^<]*\" ~/oxp-ab/bench/OxpMicro/OxpMicro.fsproj | sed \"s/.*>//\")

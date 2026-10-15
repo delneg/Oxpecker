@@ -2,6 +2,8 @@
 # Runs ON wsl26. Correctness gate: src + examples build, runnable test suites pass, fantomas check on src,
 # public API dump identical to bench/api-baseline.txt. Exit 0 = pass.
 set -euo pipefail
+# all work stays on CPUs 0-11 (12-23 belong to another agent)
+[ -z "${OXP_PINNED:-}" ] && exec env OXP_PINNED=1 taskset -c 0-11 bash "$0" "$@"
 cd "$(dirname "$0")/.."
 export DOTNET_ROOT=$HOME/.dotnet PATH=$HOME/.dotnet:$PATH DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1
 tfm() { grep -o '<TargetFramework>[^<]*' "$1" | sed 's/.*>//'; }
