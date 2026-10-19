@@ -588,3 +588,74 @@ let ``AddText is the same as adding a RegularTextNode`` () =
     b.AddChild(RegularTextNode "!")
     Render.toString a |> shouldEqual(Render.toString b)
     Render.toString a |> shouldEqual "<div>1&lt;2!</div>"
+
+[<Fact>]
+let ``A node added several times to one or more parents renders everywhere`` () =
+    let shared = b() { "x" }
+    let first =
+        div() {
+            "a"
+            shared
+            shared
+            raw "<i/>"
+            shared
+        }
+    let second =
+        p() {
+            span()
+            shared
+        }
+    let third = section() { shared }
+    first
+    |> Render.toString
+    |> shouldEqual "<div>a<b>x</b><b>x</b><i/><b>x</b></div>"
+    second |> Render.toString |> shouldEqual "<p><span></span><b>x</b></p>"
+    third |> Render.toString |> shouldEqual "<section><b>x</b></section>"
+    first.Children |> Seq.length |> shouldEqual 5
+    first.Children
+    |> Seq.filter(fun c -> obj.ReferenceEquals(c, shared))
+    |> Seq.length
+    |> shouldEqual 3
+    second.Children
+    |> Seq.map(fun c -> c.GetType().Name)
+    |> Seq.toList
+    |> shouldEqual [ "span"; "b" ]
+    // adding after enumeration and rendering keeps the order
+    first.AddChild(br())
+    first
+    |> Render.toString
+    |> shouldEqual "<div>a<b>x</b><b>x</b><i/><b>x</b><br></div>"
+
+[<Fact>]
+let ``Children of mixed kinds keep their order`` () =
+    let items = [ for i in 1..5 -> li() { string i } ]
+    let list =
+        ul() {
+            "start"
+            for item in items do
+                item
+                raw "|"
+            5
+        }
+    list
+    |> Render.toString
+    |> shouldEqual "<ul>start<li>1</li>|<li>2</li>|<li>3</li>|<li>4</li>|<li>5</li>|5</ul>"
+    list.Children |> Seq.length |> shouldEqual 12
+    list.Children
+    |> Seq.skip 1
+    |> Seq.head
+    |> shouldEqual(items.Head :> HtmlElement)
+
+[<Fact>]
+let ``A static node shared by pages built in parallel renders in every page`` () =
+    let shared = footer() { "f" }
+    let results =
+        Array.Parallel.init 2000 (fun i ->
+            div() {
+                h1() { string i }
+                shared
+                span() { "s" }
+            }
+            |> Render.toString)
+    results
+    |> Array.iteri(fun i html -> html |> shouldEqual $"<div><h1>{i}</h1><footer>f</footer><span>s</span></div>")

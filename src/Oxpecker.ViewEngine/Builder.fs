@@ -1,7 +1,8 @@
-namespace Oxpecker.ViewEngine
+﻿namespace Oxpecker.ViewEngine
 
 open System.Runtime.CompilerServices
 open System.Text
+open System.Threading
 open Tools
 
 [<AutoOpen>]
@@ -26,35 +27,6 @@ module Builder =
         member this.Render(sb: StringBuilder) = sb |> CustomWebUtility.htmlEncode text
         interface HtmlElement with
             member this.Render sb = this.Render sb
-
-    /// Children of a container: the first child is stored inline, so the common single-child case needs no queue item.
-    /// A text first child is stored as the string itself (no RegularTextNode), so First is an HtmlElement or a string.
-    [<Struct>]
-    type internal ChildList =
-        val mutable First: obj | null
-        val mutable Rest: CustomQueue<HtmlElement>
-        member this.Add(element: HtmlElement) =
-            // a null element goes to the queue, so the order and contents stay as they were
-            if isNull this.First && this.Rest.IsEmpty && isNotNull(box element) then
-                this.First <- element
-            else
-                this.Rest.Enqueue(element)
-        member this.AddText(text: string | null) =
-            // a plain null check: the NonNull active pattern would allocate a Choice per call
-            if isNotNull text && isNull this.First && this.Rest.IsEmpty then
-                this.First <- text
-            else
-                this.Rest.Enqueue(RegularTextNode text)
-        member this.AsEnumerable() =
-            let first = this.First
-            let rest = this.Rest
-            seq {
-                match first with
-                | null -> ()
-                | :? string as text -> yield RegularTextNode text :> HtmlElement
-                | element -> yield element :?> HtmlElement
-                yield! rest.AsEnumerable()
-            }
 
     /// Attributes of a tag: the first attribute is stored inline, so the common single-attribute case needs no queue item
     [<Struct>]
@@ -96,36 +68,119 @@ module Builder =
             attributes.Rest |> CustomQueue.iter(fun attr -> renderAttribute sb attr)
             sb.Append('>') |> ignore
 
-        let inline renderChildren (sb: StringBuilder) (children: ChildList) =
-            match children.First with
-            | null -> ()
-            | :? string as text -> sb |> CustomWebUtility.htmlEncode text
-            | first -> (first :?> HtmlElement).Render(sb)
-            children.Rest |> CustomQueue.iter(fun child -> child.Render(sb))
         let inline renderEndTag (tagName: string) (sb: StringBuilder) =
             sb.Append("</").Append(tagName).Append('>') |> ignore
 
-    /// Node with children only (no attributes)
-    type FragmentNode() =
-        let mutable children: ChildList = Unchecked.defaultof<_>
-        member this.Children = children.AsEnumerable()
-        member this.AddChild(element: HtmlElement) = children.Add(element)
+    /// One child after the first, when it can't link through its own NextSibling field
+    [<Sealed>]
+    type internal ChildItem(value: HtmlElement) =
+        member this.Value = value
+        [<DefaultValue(false)>]
+        val mutable Next: obj | null
+
+    /// Children of a container: the first child is stored inline, so the common single-child case needs no queue item.
+    /// A text first child is stored as the string itself (no RegularTextNode), so First is an HtmlElement or a string.
+    /// The other children form a circular singly linked list of which only the tail is stored (tail's next is the head).
+    /// A RegularNode is linked through its own NextSibling field the first time it follows a first child anywhere
+    /// (claimed atomically, so a node shared between threads or added twice is never linked twice); any other element,
+    /// or a RegularNode already linked elsewhere, is linked through a ChildItem.
+    [<Struct>]
+    type internal ChildList =
+        val mutable First: obj | null
+        val mutable Tail: obj | null
+
+        static member private NextOf(link: obj | null) : obj | null =
+            match link with
+            | :? ChildItem as item -> item.Next
+            | :? RegularNode as node -> node.NextSibling
+            | _ -> null
+
+        static member private SetNext(link: obj | null, next: obj | null) =
+            match link with
+            | :? ChildItem as item -> item.Next <- next
+            | :? RegularNode as node -> node.NextSibling <- next
+            | _ -> ()
+
+        static member private ValueOf(link: obj | null) : HtmlElement =
+            match link with
+            | :? ChildItem as item -> item.Value
+            | :? RegularNode as node -> node
+            | _ -> Unchecked.defaultof<_>
+
+        member this.Enqueue(element: HtmlElement) =
+            let tail = this.Tail
+            let linkedNode =
+                match box element with
+                | :? RegularNode as node ->
+                    let head = if isNull tail then box node else ChildList.NextOf tail
+                    isNull(Interlocked.CompareExchange(&node.NextSibling, head, null))
+                | _ -> false
+            let link: obj | null =
+                if linkedNode then
+                    box element
+                else
+                    let item = ChildItem(element)
+                    item.Next <- (if isNull tail then box item else ChildList.NextOf tail)
+                    item
+            if isNotNull tail then
+                ChildList.SetNext(tail, link)
+            this.Tail <- link
+
+        member this.Add(element: HtmlElement) =
+            // a null element goes to the list, so the order and contents stay as they were
+            if isNull this.First && isNull this.Tail && isNotNull(box element) then
+                this.First <- element
+            else
+                this.Enqueue(element)
+        member this.AddText(text: string | null) =
+            // a plain null check: the NonNull active pattern would allocate a Choice per call
+            if isNotNull text && isNull this.First && isNull this.Tail then
+                this.First <- text
+            else
+                this.Enqueue(RegularTextNode text)
         member this.Render(sb: StringBuilder) =
-            RenderHelpers.renderChildren sb children
-        interface HtmlContainer with
-            member this.Render sb = this.Render sb
-            member this.AddChild element = this.AddChild element
+            match this.First with
+            | null -> ()
+            | :? string as text -> sb |> CustomWebUtility.htmlEncode text
+            | first -> (first :?> HtmlElement).Render(sb)
+            let tail = this.Tail
+            if isNotNull tail then
+                let mutable link = tail
+                let mutable go = true
+                while go do
+                    link <- ChildList.NextOf link
+                    (ChildList.ValueOf link).Render(sb)
+                    go <- not(obj.ReferenceEquals(link, tail))
+        member this.AsEnumerable() =
+            let first = this.First
+            let tail = this.Tail
+            seq {
+                match first with
+                | null -> ()
+                | :? string as text -> yield RegularTextNode text :> HtmlElement
+                | element -> yield element :?> HtmlElement
+                if isNotNull tail then
+                    let mutable link = tail
+                    let mutable go = true
+                    while go do
+                        link <- ChildList.NextOf link
+                        yield ChildList.ValueOf link
+                        go <- not(obj.ReferenceEquals(link, tail))
+            }
 
     /// Node with both children and attributes
-    type RegularNode(tagName: string) =
+    and RegularNode(tagName: string) =
         let mutable children: ChildList = Unchecked.defaultof<_>
         let mutable attributes: AttributeList = Unchecked.defaultof<_>
+        /// Next child of the parent this node was linked into (see ChildList)
+        [<DefaultValue(false)>]
+        val mutable internal NextSibling: obj | null
         member this.Children = children.AsEnumerable()
         member this.Attributes = attributes.AsEnumerable()
         member this.TagName = tagName
         member this.Render(sb: StringBuilder) =
             RenderHelpers.renderStartTag tagName sb attributes
-            RenderHelpers.renderChildren sb children
+            children.Render(sb)
             RenderHelpers.renderEndTag tagName sb
         member this.AddAttribute(attribute: HtmlAttribute) = attributes.Add(attribute)
         member this.AddChild(element: HtmlElement) = children.Add(element)
@@ -136,6 +191,16 @@ module Builder =
         interface HtmlTag with
             member this.AddAttribute attribute = this.AddAttribute attribute
         interface HtmlContainer with
+            member this.AddChild element = this.AddChild element
+
+    /// Node with children only (no attributes)
+    type FragmentNode() =
+        let mutable children: ChildList = Unchecked.defaultof<_>
+        member this.Children = children.AsEnumerable()
+        member this.AddChild(element: HtmlElement) = children.Add(element)
+        member this.Render(sb: StringBuilder) = children.Render(sb)
+        interface HtmlContainer with
+            member this.Render sb = this.Render sb
             member this.AddChild element = this.AddChild element
 
     /// Node with attributes only (no children)
@@ -169,7 +234,7 @@ module Builder =
         member this.AddChild(element: HtmlElement) = children.Add(element)
         member this.Render(sb: StringBuilder) =
             sb.Append(prefix) |> ignore
-            RenderHelpers.renderChildren sb children
+            children.Render(sb)
             sb.Append(suffix) |> ignore
         interface HtmlContainer with
             member this.Render sb = this.Render sb
