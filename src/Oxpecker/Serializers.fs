@@ -93,14 +93,26 @@ type SystemTextJsonSerializer(?options: JsonSerializerOptions) =
             // overload of JsonSerializer.DeserializeAsync allocates on every call: PipeReadBufferState.Dispose compares
             // ReadOnlySequence values with ValueType.Equals (boxing and reflection). Other content types and charsets keep
             // ReadFromJsonAsync, with its transcoding and errors.
+            let contentType = request.ContentType
             let isUtf8Json =
-                match Microsoft.Net.Http.Headers.MediaTypeHeaderValue.TryParse(request.ContentType) with
-                | true, NonNull mediaType ->
-                    (mediaType.MediaType.Equals("application/json", StringComparison.OrdinalIgnoreCase)
-                     || mediaType.Suffix.Equals("json", StringComparison.OrdinalIgnoreCase))
-                    && (not mediaType.Charset.HasValue
-                        || mediaType.Charset.Equals("utf-8", StringComparison.OrdinalIgnoreCase))
-                | _ -> false
+                // the two usual spellings without parsing (MediaTypeHeaderValue gives the same answer for them)
+                if
+                    String.Equals(contentType, "application/json", StringComparison.OrdinalIgnoreCase)
+                    || String.Equals(contentType, "application/json; charset=utf-8", StringComparison.OrdinalIgnoreCase)
+                then
+                    true
+                else
+                    let mutable mediaType = null
+                    if Microsoft.Net.Http.Headers.MediaTypeHeaderValue.TryParse(contentType, &mediaType) then
+                        match mediaType with
+                        | null -> false
+                        | mediaType ->
+                            (mediaType.MediaType.Equals("application/json", StringComparison.OrdinalIgnoreCase)
+                             || mediaType.Suffix.Equals("json", StringComparison.OrdinalIgnoreCase))
+                            && (not mediaType.Charset.HasValue
+                                || mediaType.Charset.Equals("utf-8", StringComparison.OrdinalIgnoreCase))
+                    else
+                        false
             if isUtf8Json then
                 task {
                     match! JsonSerializer.DeserializeAsync<'T>(request.Body, options, ctx.RequestAborted) with
