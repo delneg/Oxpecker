@@ -927,6 +927,7 @@ M Oxpecker.ViewEngine.Builder+RegularNode :: System.Collections.Generic.IEnumera
 M Oxpecker.ViewEngine.Builder+RegularNode :: System.String get_TagName<>()
 M Oxpecker.ViewEngine.Builder+RegularNode :: System.Void AddAttribute<>(Oxpecker.ViewEngine.Builder+HtmlAttribute attribute)
 M Oxpecker.ViewEngine.Builder+RegularNode :: System.Void AddChild<>(Oxpecker.ViewEngine.Builder+HtmlElement element)
+M Oxpecker.ViewEngine.Builder+RegularNode :: System.Void AddText<>(System.String text)
 M Oxpecker.ViewEngine.Builder+RegularNode :: System.Void Render<>(System.Text.StringBuilder sb)
 M Oxpecker.ViewEngine.Builder+RegularTextNode :: .ctor(System.String text)
 M Oxpecker.ViewEngine.Builder+RegularTextNode :: System.Void Render<>(System.Text.StringBuilder sb)

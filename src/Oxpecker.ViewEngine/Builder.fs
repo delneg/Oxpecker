@@ -21,23 +21,38 @@ module Builder =
         inherit HtmlElement
         abstract member AddChild: HtmlElement -> unit
 
-    /// Children of a container: the first child is stored inline, so the common single-child case needs no queue item
+    /// Text node that will be HTML-escaped
+    type RegularTextNode(text: string | null) =
+        member this.Render(sb: StringBuilder) = sb |> CustomWebUtility.htmlEncode text
+        interface HtmlElement with
+            member this.Render sb = this.Render sb
+
+    /// Children of a container: the first child is stored inline, so the common single-child case needs no queue item.
+    /// A text first child is stored as the string itself (no RegularTextNode), so First is an HtmlElement or a string.
     [<Struct>]
     type internal ChildList =
-        val mutable First: HtmlElement
+        val mutable First: obj | null
         val mutable Rest: CustomQueue<HtmlElement>
         member this.Add(element: HtmlElement) =
             // a null element goes to the queue, so the order and contents stay as they were
-            if isNull(box this.First) && this.Rest.IsEmpty && isNotNull(box element) then
+            if isNull this.First && this.Rest.IsEmpty && isNotNull(box element) then
                 this.First <- element
             else
                 this.Rest.Enqueue(element)
+        member this.AddText(text: string | null) =
+            // a plain null check: the NonNull active pattern would allocate a Choice per call
+            if isNotNull text && isNull this.First && this.Rest.IsEmpty then
+                this.First <- text
+            else
+                this.Rest.Enqueue(RegularTextNode text)
         member this.AsEnumerable() =
             let first = this.First
             let rest = this.Rest
             seq {
-                if isNotNull(box first) then
-                    yield first
+                match first with
+                | null -> ()
+                | :? string as text -> yield RegularTextNode text :> HtmlElement
+                | element -> yield element :?> HtmlElement
                 yield! rest.AsEnumerable()
             }
 
@@ -82,9 +97,10 @@ module Builder =
             sb.Append('>') |> ignore
 
         let inline renderChildren (sb: StringBuilder) (children: ChildList) =
-            let first = children.First
-            if isNotNull(box first) then
-                first.Render(sb)
+            match children.First with
+            | null -> ()
+            | :? string as text -> sb |> CustomWebUtility.htmlEncode text
+            | first -> (first :?> HtmlElement).Render(sb)
             children.Rest |> CustomQueue.iter(fun child -> child.Render(sb))
         let inline renderEndTag (tagName: string) (sb: StringBuilder) =
             sb.Append("</").Append(tagName).Append('>') |> ignore
@@ -113,6 +129,8 @@ module Builder =
             RenderHelpers.renderEndTag tagName sb
         member this.AddAttribute(attribute: HtmlAttribute) = attributes.Add(attribute)
         member this.AddChild(element: HtmlElement) = children.Add(element)
+        /// Adds an HTML-escaped text child, the same as AddChild(RegularTextNode text)
+        member this.AddText(text: string | null) = children.AddText(text)
         interface HtmlElement with
             member this.Render sb = this.Render sb
         interface HtmlTag with
@@ -131,12 +149,6 @@ module Builder =
         interface HtmlTag with
             member this.Render sb = this.Render sb
             member this.AddAttribute attribute = this.AddAttribute attribute
-
-    /// Text node that will be HTML-escaped
-    type RegularTextNode(text: string | null) =
-        member this.Render(sb: StringBuilder) = sb |> CustomWebUtility.htmlEncode text
-        interface HtmlElement with
-            member this.Render sb = this.Render sb
 
     /// Text node that will NOT be HTML-escaped
     type RawTextNode(text: string | null) =
@@ -258,7 +270,11 @@ module Builder =
                 for element in elements do
                     builder.AddChild(element)
 
-        member inline _.Yield(text: string | null) : HtmlContainerFun = _.AddChild(RegularTextNode text)
+        member inline _.Yield(text: string | null) : HtmlContainerFun =
+            fun builder ->
+                match builder with
+                | :? RegularNode as node -> node.AddText text
+                | _ -> builder.AddChild(RegularTextNode text)
 
         member inline _.Yield(value: int) : HtmlContainerFun = _.AddChild(IntNode value)
 

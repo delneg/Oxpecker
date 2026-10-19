@@ -537,3 +537,54 @@ let ``Attributes added after a null-named attribute keep their order`` () =
     |> Seq.map(fun a -> isNull(box a.Name))
     |> List.ofSeq
     |> shouldEqual [ true; false ]
+
+[<Fact>]
+let ``Text children render escaped and keep their order in every position`` () =
+    li() { "a<b" } |> Render.toString |> shouldEqual "<li>a&lt;b</li>"
+    div() {
+        "x"
+        span() { "y" }
+        "z&"
+    }
+    |> Render.toString
+    |> shouldEqual "<div>x<span>y</span>z&amp;</div>"
+    div() {
+        span()
+        "t"
+    }
+    |> Render.toString
+    |> shouldEqual "<div><span></span>t</div>"
+    let withText = p() { "hi" }
+    withText.Children
+    |> List.ofSeq
+    |> List.map(fun c -> c :? RegularTextNode, Render.toString c)
+    |> shouldEqual [ true, "hi" ]
+
+[<Fact>]
+let ``Null and empty text children keep their order`` () =
+    let nothing: string | null = null
+    let nullFirst =
+        div() {
+            nothing
+            span()
+        }
+    nullFirst |> Render.toString |> shouldEqual "<div><span></span></div>"
+    nullFirst.Children |> Seq.length |> shouldEqual 2
+    let emptyFirst =
+        div() {
+            ""
+            "x"
+        }
+    emptyFirst |> Render.toString |> shouldEqual "<div>x</div>"
+    emptyFirst.Children |> Seq.length |> shouldEqual 2
+
+[<Fact>]
+let ``AddText is the same as adding a RegularTextNode`` () =
+    let a = div()
+    a.AddText "1<2"
+    a.AddText "!"
+    let b = div()
+    b.AddChild(RegularTextNode "1<2")
+    b.AddChild(RegularTextNode "!")
+    Render.toString a |> shouldEqual(Render.toString b)
+    Render.toString a |> shouldEqual "<div>1&lt;2!</div>"
