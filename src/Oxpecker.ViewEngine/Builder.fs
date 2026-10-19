@@ -28,7 +28,7 @@ module Builder =
         val mutable Rest: CustomQueue<HtmlElement>
         member this.Add(element: HtmlElement) =
             // a null element goes to the queue, so the order and contents stay as they were
-            if isNull(box this.First) && isNull this.Rest.Head && isNotNull(box element) then
+            if isNull(box this.First) && this.Rest.IsEmpty && isNotNull(box element) then
                 this.First <- element
             else
                 this.Rest.Enqueue(element)
@@ -50,7 +50,7 @@ module Builder =
             // an attribute with a null name goes to the queue, so the order and contents stay as they were
             if
                 isNull(box this.First.Name)
-                && isNull this.Rest.Head
+                && this.Rest.IsEmpty
                 && isNotNull(box attribute.Name)
             then
                 this.First <- attribute
@@ -78,21 +78,14 @@ module Builder =
             sb.Append('<').Append(tagName) |> ignore
             if isNotNull(box attributes.First.Name) then
                 renderAttribute sb attributes.First
-            let mutable next = attributes.Rest.Head
-            while isNotNull next do
-                renderAttribute sb next.Value
-                next <- next.Next
+            attributes.Rest |> CustomQueue.iter(fun attr -> renderAttribute sb attr)
             sb.Append('>') |> ignore
 
         let inline renderChildren (sb: StringBuilder) (children: ChildList) =
             let first = children.First
             if isNotNull(box first) then
                 first.Render(sb)
-            let mutable next = children.Rest.Head
-            while isNotNull next do
-                let child = next.Value
-                child.Render(sb)
-                next <- next.Next
+            children.Rest |> CustomQueue.iter(fun child -> child.Render(sb))
         let inline renderEndTag (tagName: string) (sb: StringBuilder) =
             sb.Append("</").Append(tagName).Append('>') |> ignore
 

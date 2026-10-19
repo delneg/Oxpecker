@@ -49,26 +49,45 @@ type internal CustomQueueItem<'T>(value: 'T) =
     member this.Value = value
     member val Next = Unchecked.defaultof<CustomQueueItem<'T>> with get, set
 
+/// Queue as a circular singly linked list: only the tail is stored (tail.Next is the head), so a node holding one
+/// costs one reference instead of two
 [<Struct>]
 type internal CustomQueue<'T> =
-    val mutable Head: CustomQueueItem<'T>
     val mutable Tail: CustomQueueItem<'T>
     member this.Enqueue(value: 'T) =
         let item = CustomQueueItem(value)
-        if isNull this.Head then
-            this.Head <- item
-            this.Tail <- item
+        let tail = this.Tail
+        if isNull tail then
+            item.Next <- item
         else
-            this.Tail.Next <- item
-            this.Tail <- item
+            item.Next <- tail.Next
+            tail.Next <- item
+        this.Tail <- item
+
+    member this.IsEmpty = isNull this.Tail
 
     member this.AsEnumerable() =
-        let mutable next = this.Head
+        let tail = this.Tail
         seq {
-            while isNotNull next do
-                yield next.Value
-                next <- next.Next
+            if isNotNull tail then
+                let mutable item = tail.Next
+                yield item.Value
+                while not(obj.ReferenceEquals(item, tail)) do
+                    item <- item.Next
+                    yield item.Value
         }
+
+module internal CustomQueue =
+    /// Calls f on every item in order
+    let inline iter ([<InlineIfLambda>] f: 'T -> unit) (queue: CustomQueue<'T>) =
+        let tail = queue.Tail
+        if isNotNull tail then
+            let mutable item = tail
+            let mutable go = true
+            while go do
+                item <- item.Next
+                f item.Value
+                go <- not(obj.ReferenceEquals(item, tail))
 
 module CustomWebUtility =
 
