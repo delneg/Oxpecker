@@ -459,3 +459,91 @@ let ``HTTP GET with non-matching If-None-Match ignores not matching If-Modified-
         let! bytes = response.Content.ReadAsByteArrayAsync()
         bytes |> shouldEqual [| 48uy; 49uy; 50uy; 51uy; 52uy; 53uy; 54uy; 55uy; 56uy; 57uy; 97uy; 98uy; 99uy; 100uy; 101uy; 102uy; 103uy; 104uy; 105uy; 106uy; 107uy; 108uy; 109uy; 110uy; 111uy; 112uy; 113uy; 114uy; 115uy; 116uy; 117uy; 118uy; 119uy; 120uy; 121uy; 122uy; 65uy; 66uy; 67uy; 68uy; 69uy; 70uy; 71uy; 72uy; 73uy; 74uy; 75uy; 76uy; 77uy; 78uy; 79uy; 80uy; 81uy; 82uy; 83uy; 84uy; 85uy; 86uy; 87uy; 88uy; 89uy; 90uy |]
     }
+
+// ---------------------------------
+// validatePreconditions handler
+// ---------------------------------
+
+module ValidatePreconditionsHandler =
+    let lastModified = DateTimeOffset(2026, 1, 1, 10, 20, 30, 456, TimeSpan.Zero)
+    let lastModifiedHeader = "Thu, 01 Jan 2026 10:20:30 GMT"
+
+    let handler =
+        validatePreconditions (Some(createETag "v1")) (Some lastModified) (fun ctx ->
+            ctx.Items["next"] <- true
+            System.Threading.Tasks.Task.CompletedTask)
+
+    let createContext (method: string) (headers: (string * string) list) =
+        let ctx = DefaultHttpContext()
+        ctx.Request.Method <- method
+        for name, value in headers do
+            ctx.Request.Headers[name] <- Microsoft.Extensions.Primitives.StringValues(value)
+        ctx
+
+    let nextCalled (ctx: HttpContext) = ctx.Items.ContainsKey "next"
+
+[<Fact>]
+let ``validatePreconditions without conditional headers sets ETag and Last-Modified and calls next every time`` () =
+    task {
+        for _ in 1..2 do
+            let ctx = ValidatePreconditionsHandler.createContext "GET" []
+            do! ValidatePreconditionsHandler.handler ctx
+            ValidatePreconditionsHandler.nextCalled ctx |> shouldEqual true
+            ctx.Response.StatusCode |> shouldEqual 200
+            ctx.Response.Headers.ETag.ToString() |> shouldEqual "\"v1\""
+            ctx.Response.Headers.LastModified.ToString()
+            |> shouldEqual ValidatePreconditionsHandler.lastModifiedHeader
+    }
+
+[<Fact>]
+let ``validatePreconditions with matching If-None-Match on GET returns 304`` () =
+    task {
+        let ctx =
+            ValidatePreconditionsHandler.createContext "GET" [ "If-None-Match", "\"v1\"" ]
+        do! ValidatePreconditionsHandler.handler ctx
+        ValidatePreconditionsHandler.nextCalled ctx |> shouldEqual false
+        ctx.Response.StatusCode |> shouldEqual 304
+        ctx.Response.Headers.ETag.ToString() |> shouldEqual "\"v1\""
+    }
+
+[<Fact>]
+let ``validatePreconditions with non-matching If-Match returns 412`` () =
+    task {
+        let ctx =
+            ValidatePreconditionsHandler.createContext "PUT" [ "If-Match", "\"v2\"" ]
+        do! ValidatePreconditionsHandler.handler ctx
+        ValidatePreconditionsHandler.nextCalled ctx |> shouldEqual false
+        ctx.Response.StatusCode |> shouldEqual 412
+    }
+
+[<Fact>]
+let ``validatePreconditions with If-Modified-Since after last modified on GET returns 304`` () =
+    task {
+        let ctx =
+            ValidatePreconditionsHandler.createContext "GET" [
+                "If-Modified-Since", ValidatePreconditionsHandler.lastModified.AddDays(1.0).ToHtmlString()
+            ]
+        do! ValidatePreconditionsHandler.handler ctx
+        ValidatePreconditionsHandler.nextCalled ctx |> shouldEqual false
+        ctx.Response.StatusCode |> shouldEqual 304
+    }
+
+[<Fact>]
+let ``ValidatePreconditions extension sets response headers and reports no conditions`` () =
+    let ctx = ValidatePreconditionsHandler.createContext "GET" []
+    ctx.ValidatePreconditions(Some(createWeakETag "w"), Some ValidatePreconditionsHandler.lastModified)
+    |> shouldEqual NoConditionsSpecified
+    ctx.Response.Headers.ETag.ToString() |> shouldEqual "W/\"w\""
+    ctx.Response.Headers.LastModified.ToString()
+    |> shouldEqual ValidatePreconditionsHandler.lastModifiedHeader
+
+[<Fact>]
+let ``ValidatePreconditions formats Last-Modified correctly for many distinct dates and offsets`` () =
+    for day in 1..12 do
+        for offsetHours in [ 0; 3 ] do
+            let date = DateTimeOffset(2025, 3, day, 8, 0, 0, 999, TimeSpan.FromHours(float offsetHours))
+            for _ in 1..2 do
+                let ctx = ValidatePreconditionsHandler.createContext "GET" []
+                ctx.ValidatePreconditions(None, Some date) |> shouldEqual NoConditionsSpecified
+                ctx.Response.Headers.LastModified.ToString()
+                |> shouldEqual (date.AddMilliseconds(-999.0).ToString("r"))

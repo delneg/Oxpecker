@@ -4,6 +4,7 @@ module Oxpecker.Preconditional
 open System
 open System.Linq
 open System.Runtime.CompilerServices
+open System.Threading
 open Microsoft.AspNetCore.Http
 open Microsoft.AspNetCore.Http.Headers
 open Microsoft.Extensions.Primitives
@@ -11,6 +12,33 @@ open Microsoft.Net.Http.Headers
 
 let inline private cutOffMs (dt: DateTimeOffset) =
     DateTimeOffset(dt.Year, dt.Month, dt.Day, dt.Hour, dt.Minute, dt.Second, 0, dt.Offset)
+
+[<Sealed>]
+type private FormattedDate(date: DateTimeOffset, text: string) =
+    member _.Date = date
+    member _.Text = text
+
+/// Last-Modified values are usually a few fixed dates (one per handler), so the first few formatted dates
+/// are kept (each slot is filled once and never replaced) and reused instead of formatting a new string per request.
+module private LastModifiedCache =
+    let private slots: (FormattedDate | null) array = Array.zeroCreate 8
+
+    let format (date: DateTimeOffset) : string =
+        let mutable result: string | null = null
+        let mutable i = 0
+        while isNull result && i < slots.Length do
+            match Volatile.Read(&slots[i]) with
+            | null ->
+                let text = HeaderUtilities.FormatDate date
+                Interlocked.CompareExchange(&slots[i], FormattedDate(date, text), null)
+                |> ignore
+                result <- text
+            | slot when slot.Date.EqualsExact date -> result <- slot.Text
+            | _ -> ()
+            i <- i + 1
+        match result with
+        | null -> HeaderUtilities.FormatDate date
+        | text -> text
 
 [<Struct>]
 type Precondition =
@@ -132,34 +160,49 @@ type PreconditionExtensions() =
     static member ValidatePreconditions
         (ctx: HttpContext, eTag: EntityTagHeaderValue option, lastModified: DateTimeOffset option)
         =
-        // Parse headers
-        let responseHeaders = ctx.Response.GetTypedHeaders()
-        let requestHeaders = ctx.Request.GetTypedHeaders()
-
         // Set ETag and Last-Modified in the response
+        // (same strings as the typed ResponseHeaders setters, without allocating the typed wrapper)
+        let responseHeaders = ctx.Response.Headers
         if eTag.IsSome then
-            responseHeaders.ETag <- eTag.Value
+            responseHeaders.ETag <- StringValues(eTag.Value.ToString())
         if lastModified.IsSome then
-            responseHeaders.LastModified <- cutOffMs lastModified.Value
+            responseHeaders.LastModified <- StringValues(LastModifiedCache.format(cutOffMs lastModified.Value))
+        PreconditionExtensions.ValidateRequestPreconditions(ctx, eTag, lastModified)
 
-        // Validate headers in correct precedence
-        // RFC: https://tools.ietf.org/html/rfc7232#section-6
-        // (plain matches instead of chained helper functions, so no closures are allocated per request)
-        let afterIfUnmodifiedSince =
-            match ctx.ValidateIfMatch eTag requestHeaders with
-            | NoConditionsSpecified -> ctx.ValidateIfUnmodifiedSince lastModified requestHeaders
-            | result -> result
-        let afterIfNoneMatch =
-            match afterIfUnmodifiedSince with
-            | NoConditionsSpecified -> ctx.ValidateIfNoneMatch eTag requestHeaders
-            | AllConditionsMet ->
-                match ctx.ValidateIfNoneMatch eTag requestHeaders with
-                | NoConditionsSpecified -> AllConditionsMet
+    /// Validates the conditional request headers only (the response headers are set by the caller).
+    static member internal ValidateRequestPreconditions
+        (ctx: HttpContext, eTag: EntityTagHeaderValue option, lastModified: DateTimeOffset option)
+        =
+        let rawHeaders = ctx.Request.Headers
+        if
+            rawHeaders.IfMatch.Count = 0
+            && rawHeaders.IfNoneMatch.Count = 0
+            && rawHeaders.IfModifiedSince.Count = 0
+            && rawHeaders.IfUnmodifiedSince.Count = 0
+        then
+            // No conditional headers: every validator below would return NoConditionsSpecified
+            NoConditionsSpecified
+        else
+            let requestHeaders = ctx.Request.GetTypedHeaders()
+
+            // Validate headers in correct precedence
+            // RFC: https://tools.ietf.org/html/rfc7232#section-6
+            // (plain matches instead of chained helper functions, so no closures are allocated per request)
+            let afterIfUnmodifiedSince =
+                match ctx.ValidateIfMatch eTag requestHeaders with
+                | NoConditionsSpecified -> ctx.ValidateIfUnmodifiedSince lastModified requestHeaders
                 | result -> result
+            let afterIfNoneMatch =
+                match afterIfUnmodifiedSince with
+                | NoConditionsSpecified -> ctx.ValidateIfNoneMatch eTag requestHeaders
+                | AllConditionsMet ->
+                    match ctx.ValidateIfNoneMatch eTag requestHeaders with
+                    | NoConditionsSpecified -> AllConditionsMet
+                    | result -> result
+                | result -> result
+            match afterIfNoneMatch with
+            | NoConditionsSpecified -> ctx.ValidateIfModifiedSince lastModified requestHeaders
             | result -> result
-        match afterIfNoneMatch with
-        | NoConditionsSpecified -> ctx.ValidateIfModifiedSince lastModified requestHeaders
-        | result -> result
 
     [<Extension>]
     static member NotModifiedResponse(ctx: HttpContext) =
