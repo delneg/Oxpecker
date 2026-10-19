@@ -825,3 +825,96 @@ let ``SystemTextJsonSerializer.Deserialize gives what ReadFromJsonAsync gives``
 
         actual |> shouldEqual expected
     }
+
+let private createJsonContext (body: string) (serializer: IJsonSerializer) =
+    let ctx = DefaultHttpContext()
+    let services = ServiceCollection()
+    services.AddSingleton<IJsonSerializer>(serializer) |> ignore
+    ctx.RequestServices <- services.BuildServiceProvider()
+    ctx.Request.Body <- new MemoryStream(Encoding.UTF8.GetBytes body)
+    ctx.Request.ContentType <- "application/json"
+    ctx
+
+type private FixedTaskSerializer(result: Threading.Tasks.Task<FormPerson>) =
+    interface IJsonSerializer with
+        member _.Serialize(_, _, _) = Threading.Tasks.Task.CompletedTask
+        member _.SerializePart(_, _, _) = Threading.Tasks.Task.CompletedTask
+        member _.Deserialize<'T>(_) = box result :?> Threading.Tasks.Task<'T>
+
+[<Fact>]
+let ``bindJson binds the model with the default serializer`` () =
+    task {
+        let ctx = createJsonContext """{"name":"don","age":42}""" (SystemTextJsonSerializer())
+        let mutable bound = None
+
+        do!
+            bindJson
+                (fun (p: FormPerson) ->
+                    bound <- Some p
+                    text "ok")
+                ctx
+
+        bound |> shouldEqual(Some { Name = "don"; Age = 42 })
+    }
+
+[<Fact>]
+let ``bindJson returns a faulted task when the handler throws`` () =
+    let ctx = createJsonContext """{"name":"don","age":42}""" (SystemTextJsonSerializer())
+
+    let t = bindJson (fun (_: FormPerson) -> failwith "handler failed") ctx
+
+    t.IsFaulted |> shouldEqual true
+    t.Exception.InnerException.Message |> shouldEqual "handler failed"
+
+[<Fact>]
+let ``bindJson and BindJson give a task faulted with ModelBindException for invalid JSON`` () =
+    task {
+        let t =
+            bindJson
+                (fun (_: FormPerson) -> text "ok")
+                (createJsonContext """{"name":"don","age":"x"}""" (SystemTextJsonSerializer()))
+        let! _ = Threading.Tasks.Task.WhenAny t
+        t.IsFaulted |> shouldEqual true
+        t.Exception.InnerException :? ModelBindException |> shouldEqual true
+
+        let t2 = (createJsonContext """{"name":"don","age":"x"}""" (SystemTextJsonSerializer())).BindJson<FormPerson>()
+        let! _ = Threading.Tasks.Task.WhenAny t2
+        t2.IsFaulted |> shouldEqual true
+        t2.Exception.InnerException :? ModelBindException |> shouldEqual true
+    }
+
+[<Fact>]
+let ``bindJson and BindJson return a cancelled task when the request is aborted`` () =
+    task {
+        use cts = new Threading.CancellationTokenSource()
+        cts.Cancel()
+        let ctx = createJsonContext """{"name":"don","age":42}""" (SystemTextJsonSerializer())
+        ctx.RequestAborted <- cts.Token
+
+        let t = bindJson (fun (_: FormPerson) -> text "ok") ctx
+        let! _ = Threading.Tasks.Task.WhenAny t
+        t.IsCanceled |> shouldEqual true
+        let t2 = ctx.BindJson<FormPerson>()
+        let! _ = Threading.Tasks.Task.WhenAny t2
+        t2.IsCanceled |> shouldEqual true
+    }
+
+[<Fact>]
+let ``BindJson hands out another serializer's completed task as is`` () =
+    let result = Threading.Tasks.Task.FromResult { Name = "fixed"; Age = 1 }
+    let ctx = createJsonContext "" (FixedTaskSerializer result)
+
+    obj.ReferenceEquals(ctx.BindJson<FormPerson>(), result) |> shouldEqual true
+
+[<Fact>]
+let ``BindJson wraps another serializer's failure in ModelBindException`` () =
+    task {
+        let failed = Threading.Tasks.Task.FromException<FormPerson>(InvalidOperationException "bad")
+        let ctx = createJsonContext "" (FixedTaskSerializer failed)
+
+        let t = ctx.BindJson<FormPerson>()
+        let! _ = Threading.Tasks.Task.WhenAny t
+        t.IsFaulted |> shouldEqual true
+        t.Exception.InnerException :? ModelBindException |> shouldEqual true
+        t.Exception.InnerException.InnerException.Message |> shouldEqual "bad"
+    }

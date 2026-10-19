@@ -549,24 +549,35 @@ type HttpContextExtensions() =
     /// <typeparam name="'T"></typeparam>
     /// <returns>Returns a <see cref="System.Threading.Tasks.Task{T}"/></returns>
     [<Extension>]
-    static member BindJson<'T>(ctx: HttpContext) =
+    static member BindJson<'T>(ctx: HttpContext) : Task<'T> =
+        HttpContextExtensions.BindJsonValue<'T>(ctx).AsTask()
+
+    /// BindJson without a Task when the default serializer has read the body synchronously; the same results,
+    /// exceptions and cancellation (another serializer's task is handed out as before)
+    static member internal BindJsonValue<'T>(ctx: HttpContext) : ValueTask<'T> =
         let serializer = ctx.GetJsonSerializer()
         let deserialized =
             try
-                serializer.Deserialize<'T>(ctx)
+                match serializer with
+                | :? SystemTextJsonSerializer as stj when serializer.GetType() = typeof<SystemTextJsonSerializer> ->
+                    stj.DeserializeValue<'T>(ctx)
+                | _ -> ValueTask<'T>(serializer.Deserialize<'T>(ctx))
             with ex ->
                 // handled below exactly like an asynchronous failure
-                Task.FromException<'T> ex
+                ValueTask<'T>(Task.FromException<'T> ex)
         if deserialized.IsCompletedSuccessfully then
-            // nothing to wrap: hand out the completed task instead of allocating another one
+            // nothing to wrap: hand out the completed value (or task) instead of allocating another one
             deserialized
         else
-            task {
-                try
-                    return! deserialized
-                with ex when not(ex :? OperationCanceledException) ->
-                    return raise <| ModelBindException("Unable to deserialize model from JSON", ex)
-            }
+            let deserialized = deserialized.AsTask()
+            ValueTask<'T>(
+                task {
+                    try
+                        return! deserialized
+                    with ex when not(ex :? OperationCanceledException) ->
+                        return raise <| ModelBindException("Unable to deserialize model from JSON", ex)
+                }
+            )
 
     /// <summary>
     /// Parses all input elements from an HTML form into an object of type 'T.

@@ -3,6 +3,7 @@ namespace Oxpecker
 open System
 open System.IO
 open System.IO.Pipelines
+open System.Runtime.ExceptionServices
 open Microsoft.AspNetCore.Http
 open System.Text.Json
 open System.Threading
@@ -86,42 +87,60 @@ type SystemTextJsonSerializer(?options: JsonSerializerOptions) =
         member this.SerializePart(value, writer, cancellationToken) =
             JsonSerializer.SerializeAsync(writer, value, options, cancellationToken)
 
-        member this.Deserialize(ctx) =
-            let request = ctx.Request
-            // A JSON content type in UTF-8: what HttpRequest.ReadFromJsonAsync does, but reading Request.Body, as ASP.NET
-            // Core does with its Microsoft.AspNetCore.UseStreamBasedJsonParsing switch. In .NET 11 RC 2 the PipeReader
-            // overload of JsonSerializer.DeserializeAsync allocates on every call: PipeReadBufferState.Dispose compares
-            // ReadOnlySequence values with ValueType.Equals (boxing and reflection). Other content types and charsets keep
-            // ReadFromJsonAsync, with its transcoding and errors.
-            let contentType = request.ContentType
-            let isUtf8Json =
-                // the two usual spellings without parsing (MediaTypeHeaderValue gives the same answer for them)
-                if
-                    String.Equals(contentType, "application/json", StringComparison.OrdinalIgnoreCase)
-                    || String.Equals(contentType, "application/json; charset=utf-8", StringComparison.OrdinalIgnoreCase)
-                then
-                    true
-                else
-                    let mutable mediaType = null
-                    if Microsoft.Net.Http.Headers.MediaTypeHeaderValue.TryParse(contentType, &mediaType) then
-                        match mediaType with
-                        | null -> false
-                        | mediaType ->
-                            (mediaType.MediaType.Equals("application/json", StringComparison.OrdinalIgnoreCase)
-                             || mediaType.Suffix.Equals("json", StringComparison.OrdinalIgnoreCase))
-                            && (not mediaType.Charset.HasValue
-                                || mediaType.Charset.Equals("utf-8", StringComparison.OrdinalIgnoreCase))
-                    else
-                        false
-            if isUtf8Json then
-                task {
-                    match! JsonSerializer.DeserializeAsync<'T>(request.Body, options, ctx.RequestAborted) with
-                    | null -> return Unchecked.defaultof<_>
-                    | v -> return v
-                }
+        member this.Deserialize(ctx) = this.DeserializeValue(ctx).AsTask()
+
+    /// Deserialize without a Task<'T> when the body has already been read: the same results, exceptions and cancellation
+    member internal this.DeserializeValue<'T>(ctx: HttpContext) : ValueTask<'T> =
+        let request = ctx.Request
+        // A JSON content type in UTF-8: what HttpRequest.ReadFromJsonAsync does, but reading Request.Body, as ASP.NET
+        // Core does with its Microsoft.AspNetCore.UseStreamBasedJsonParsing switch. In .NET 11 RC 2 the PipeReader
+        // overload of JsonSerializer.DeserializeAsync allocates on every call: PipeReadBufferState.Dispose compares
+        // ReadOnlySequence values with ValueType.Equals (boxing and reflection). Other content types and charsets keep
+        // ReadFromJsonAsync, with its transcoding and errors.
+        let contentType = request.ContentType
+        let isUtf8Json =
+            // the two usual spellings without parsing (MediaTypeHeaderValue gives the same answer for them)
+            if
+                String.Equals(contentType, "application/json", StringComparison.OrdinalIgnoreCase)
+                || String.Equals(contentType, "application/json; charset=utf-8", StringComparison.OrdinalIgnoreCase)
+            then
+                true
             else
+                let mutable mediaType = null
+                if Microsoft.Net.Http.Headers.MediaTypeHeaderValue.TryParse(contentType, &mediaType) then
+                    match mediaType with
+                    | null -> false
+                    | mediaType ->
+                        (mediaType.MediaType.Equals("application/json", StringComparison.OrdinalIgnoreCase)
+                         || mediaType.Suffix.Equals("json", StringComparison.OrdinalIgnoreCase))
+                        && (not mediaType.Charset.HasValue
+                            || mediaType.Charset.Equals("utf-8", StringComparison.OrdinalIgnoreCase))
+                else
+                    false
+        try
+            let pending =
+                if isUtf8Json then
+                    JsonSerializer.DeserializeAsync<'T>(request.Body, options, ctx.RequestAborted)
+                else
+                    request.ReadFromJsonAsync<'T>(options, ctx.RequestAborted)
+            if pending.IsCompletedSuccessfully then
+                match pending.Result with
+                | null -> ValueTask<'T>(Unchecked.defaultof<'T>)
+                | v -> ValueTask<'T>(v)
+            else
+                ValueTask<'T>(
+                    task {
+                        match! pending with
+                        | null -> return Unchecked.defaultof<_>
+                        | v -> return v
+                    }
+                )
+        with ex ->
+            // what task { } gave for an exception before its first await: cancelled for OperationCanceledException
+            let thrown = ExceptionDispatchInfo.Capture ex
+            ValueTask<'T>(
                 task {
-                    match! request.ReadFromJsonAsync(options, ctx.RequestAborted) with
-                    | null -> return Unchecked.defaultof<_>
-                    | v -> return v
+                    thrown.Throw()
+                    return Unchecked.defaultof<'T>
                 }
+            )
