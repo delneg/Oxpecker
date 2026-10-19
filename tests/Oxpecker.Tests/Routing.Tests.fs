@@ -1113,3 +1113,66 @@ let ``routef: format types, argument counts and handler shapes`` (path: string, 
 
         (int result.StatusCode, resultString) |> shouldEqual(status, body)
     }
+
+[<Fact>]
+let ``HTTP verb functions give the same verb-applied routes on every enumeration`` () =
+    let endpoint = GET [ route "/a" <| text "a"; route "/b" <| text "b" ]
+    match endpoint with
+    | MultiEndpoint(children, _) ->
+        let first = List.ofSeq children
+        let second = List.ofSeq children
+        List.forall2 (fun (x: Endpoint) (y: Endpoint) -> obj.ReferenceEquals(x, y)) first second
+        |> shouldEqual true
+        first
+        |> List.map(function
+            | SimpleEndpoint(verbs, template, _, _) -> verbs, template
+            | _ -> failwith "SimpleEndpoint expected")
+        |> shouldEqual [ Verbs [ HttpVerb.GET ], "/a"; Verbs [ HttpVerb.GET ], "/b" ]
+    | _ -> failwith "MultiEndpoint expected"
+
+[<Fact>]
+let ``Nested HTTP verb functions over plain routes keep their verbs`` () =
+    let verbsOf endpoint =
+        match endpoint with
+        | MultiEndpoint(children, _) ->
+            children
+            |> Seq.collect(function
+                | MultiEndpoint(inner, _) -> inner
+                | e -> Seq.singleton e)
+            |> Seq.map(function
+                | SimpleEndpoint(verbs, _, _, _) -> verbs
+                | _ -> failwith "SimpleEndpoint expected")
+            |> List.ofSeq
+        | _ -> failwith "MultiEndpoint expected"
+    GET [ GET [ route "/a" <| text "a" ] ]
+    |> verbsOf
+    |> shouldEqual [ Verbs [ HttpVerb.GET ] ]
+    GET [ applyHttpVerbsToEndpoints Any [ route "/a" <| text "a" ] ]
+    |> verbsOf
+    |> shouldEqual [ Verbs [ HttpVerb.GET ] ]
+    let ex = Assert.ThrowsAny<exn>(fun () -> POST [ GET [ route "/a" <| text "a" ] ] |> verbsOf |> ignore)
+    ex.Message |> shouldEqual "Http verbs intersect at '/a'"
+
+[<Fact>]
+let ``subRoutef: GET and POST groups built per request route by verb`` () =
+    task {
+        let endpoints = [
+            subRoutef "/org/{%s}" (fun (org: string) -> [
+                GET [ route "/info" <| text $"get {org}"; route "/other" <| text "other" ]
+                POST [ route "/info" <| text $"post {org}" ]
+            ])
+        ]
+        use! server = WebApp.webApp endpoints
+        let client = server.GetTestClient()
+
+        let! getInfo = client.GetStringAsync("/org/acme/info")
+        let! other = client.GetStringAsync("/org/acme/other")
+        let! post = client.PostAsync("/org/acme/info", new StringContent(""))
+        let! postText = post.Content.ReadAsStringAsync()
+        let! postOther = client.PostAsync("/org/acme/other", new StringContent(""))
+
+        getInfo |> shouldEqual "get acme"
+        other |> shouldEqual "other"
+        postText |> shouldEqual "post acme"
+        postOther.IsSuccessStatusCode |> shouldEqual false
+    }

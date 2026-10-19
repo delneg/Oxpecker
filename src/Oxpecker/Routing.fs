@@ -432,6 +432,61 @@ module RoutingInternal =
         |> nonNull
         :?> Endpoint seq
 
+    /// What GET [...] (and the other verb functions) return for a list or array of plain routes whose verbs are Any or
+    /// the same verbs: the routes with the verbs applied are built once, when first enumerated, so a subRoutef factory
+    /// that calls GET on every request does not copy its routes; subRoutef reads the source routes and these verbs.
+    [<Sealed>]
+    type internal VerbsAppliedRoutes(verbs: HttpVerbs, source: Endpoint seq) =
+        [<DefaultValue>]
+        val mutable private materialized: Endpoint array | null
+        member _.Verbs = verbs
+        /// An Endpoint list or array of SimpleEndpoints only
+        member _.Source = source
+        member private this.Materialize() : Endpoint array =
+            match this.materialized with
+            | null ->
+                let result =
+                    source
+                    |> Seq.map(fun endpoint ->
+                        match endpoint with
+                        | SimpleEndpoint(_, template, handler, configure) ->
+                            SimpleEndpoint(verbs, template, handler, configure)
+                        | other -> other)
+                    |> Seq.toArray
+                // the first array published wins, so every enumeration yields the same endpoint instances
+                Threading.Interlocked.CompareExchange(&this.materialized, result, null)
+                |> ignore
+                nonNull this.materialized
+            | materialized -> materialized
+        interface Collections.Generic.IEnumerable<Endpoint> with
+            member this.GetEnumerator() =
+                (this.Materialize() :> Collections.Generic.IEnumerable<Endpoint>).GetEnumerator()
+        interface Collections.IEnumerable with
+            member this.GetEnumerator() = this.Materialize().GetEnumerator()
+
+    /// True when every endpoint is a SimpleEndpoint whose verbs are Any or these verbs (lists and arrays only)
+    let internal arePlainRoutesFor (verbs: HttpVerbs) (endpoints: Endpoint seq) =
+        let inline isPlain endpoint =
+            match endpoint with
+            | SimpleEndpoint(oldVerbs, _, _, _) -> oldVerbs = HttpVerbs.Any || oldVerbs = verbs
+            | _ -> false
+        match endpoints with
+        | :? (Endpoint list) as list ->
+            let mutable rest = list
+            let mutable ok = true
+            while ok && not rest.IsEmpty do
+                ok <- isPlain rest.Head
+                rest <- rest.Tail
+            ok
+        | :? (Endpoint array) as array ->
+            let mutable index = 0
+            let mutable ok = true
+            while ok && index < array.Length do
+                ok <- isPlain array[index]
+                index <- index + 1
+            ok
+        | _ -> false
+
     // Structure, templates and HTTP verbs of the endpoints returned by subRoutef factory at startup
     [<NoEquality; NoComparison>]
     type private EndpointShape =
@@ -478,22 +533,30 @@ module RoutingInternal =
         let mutable index = 0
         let mutable isValid = true
         let mutable handler = ValueNone
-        // lists and arrays (what factories and HTTP verb functions return) are walked without an enumerator
+        // lists and arrays (what factories and HTTP verb functions return) are walked without an enumerator; routes
+        // given to GET [...] etc. are read from their source with the verbs applied, without copying them
+        let mutable verbs = ValueNone
+        let endpoints =
+            match endpoints with
+            | :? VerbsAppliedRoutes as routes ->
+                verbs <- ValueSome routes.Verbs
+                routes.Source
+            | _ -> endpoints
         match endpoints with
         | :? (Endpoint list) as list ->
             let mutable rest = list
             while isValid && not rest.IsEmpty do
-                isValid <- checkEndpoint shapes indexPath depth index rest.Head &handler
+                isValid <- checkEndpoint shapes indexPath depth index verbs rest.Head &handler
                 index <- index + 1
                 rest <- rest.Tail
         | :? (Endpoint array) as array ->
             while isValid && index < array.Length do
-                isValid <- checkEndpoint shapes indexPath depth index array[index] &handler
+                isValid <- checkEndpoint shapes indexPath depth index verbs array[index] &handler
                 index <- index + 1
         | _ ->
             use enumerator = endpoints.GetEnumerator()
             while isValid && enumerator.MoveNext() do
-                isValid <- checkEndpoint shapes indexPath depth index enumerator.Current &handler
+                isValid <- checkEndpoint shapes indexPath depth index verbs enumerator.Current &handler
                 index <- index + 1
         struct (isValid && index = shapes.Length, handler)
 
@@ -502,6 +565,7 @@ module RoutingInternal =
         (indexPath: int array)
         (depth: int)
         (index: int)
+        (appliedVerbs: HttpVerbs voption)
         (endpoint: Endpoint)
         (handler: byref<EndpointHandler voption>)
         : bool =
@@ -510,7 +574,8 @@ module RoutingInternal =
             let childDepth = if isOnPath then depth + 1 else -1
             match endpoint, shapes[index] with
             | SimpleEndpoint(verbs, template, endpointHandler, _), SimpleShape(expectedVerbs, expected) when
-                template = expected && isSameVerbs verbs expectedVerbs
+                template = expected
+                && isSameVerbs (appliedVerbs |> ValueOption.defaultValue verbs) expectedVerbs
                 ->
                 if isOnPath then
                     handler <- ValueSome endpointHandler
@@ -607,6 +672,9 @@ module Routers =
     // so their errors are thrown when the endpoints are enumerated, as before.
     and private applyHttpVerbsToSeq (verbs: HttpVerbs) (endpoints: Endpoint seq) : Endpoint seq =
         match endpoints with
+        | _ when arePlainRoutesFor verbs endpoints -> VerbsAppliedRoutes(verbs, endpoints)
+        | :? VerbsAppliedRoutes as routes when routes.Verbs = verbs -> routes
+        | :? VerbsAppliedRoutes as routes when routes.Verbs = HttpVerbs.Any -> VerbsAppliedRoutes(verbs, routes.Source)
         | :? (Endpoint list) as list ->
             let result = Array.zeroCreate list.Length
             let mutable rest = list
