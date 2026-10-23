@@ -79,8 +79,10 @@ type HttpContext with
             match eTag with
             | None -> AllConditionsMet
             | Some eTag ->
-                ifNoneMatch
-                |> Seq.exists _.Compare(eTag, false)
+                let mutable found = false
+                for i in 0 .. ifNoneMatch.Count - 1 do
+                    found <- found || ifNoneMatch[i].Compare(eTag, false)
+                found
                 |> function
                     | false -> AllConditionsMet
                     | true ->
