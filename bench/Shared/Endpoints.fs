@@ -51,6 +51,7 @@ let endpoints = [
         route "/json" <| json { message = "Hello, World!" }
         route "/json-users" <| json users
         routef "/user/{%s}/{%i}" (fun (name: string) (id: int) -> text "User received")
+        routef "/user1/{%s}" (fun (name: string) -> text "User received")
         routef "/userctx/{%s}/{%i}" (fun (name: string) (id: int) (ctx: HttpContext) -> ctx.WriteText "User received")
         route "/headers" headerQuery
         route "/composed" (setStatusCode 200 >=> setHttpHeader "X-Bench" "1" >=> text "composed")

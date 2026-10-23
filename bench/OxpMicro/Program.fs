@@ -89,6 +89,7 @@ let cases = [
     "json", "/json", ""
     "json-users", "/json-users", ""
     "user", "/user/don/42", ""
+    "user1", "/user1/don", ""
     "ctx", "/userctx/don/42", ""
     "headers", "/headers", "?q=1"
     "composed", "/composed", ""
@@ -124,6 +125,8 @@ type Endpoints() =
     member _.JsonUsers() = h.Run("/json-users", "")
     [<Benchmark>]
     member _.Routef() = h.Run("/user/don/42", "")
+    [<Benchmark>]
+    member _.Routef1() = h.Run("/user1/don", "")
     [<Benchmark>]
     member _.RoutefCtx() = h.Run("/userctx/don/42", "")
     [<Benchmark>]
