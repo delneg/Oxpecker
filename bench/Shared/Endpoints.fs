@@ -8,6 +8,8 @@ open Oxpecker.ViewEngine
 [<CLIMutable>]
 type Message = { message: string }
 
+type Person = { Name: string; Age: int }
+
 type User = {
     Name: string
     Age: int
@@ -54,6 +56,16 @@ let endpoints = [
         route "/composed" (setStatusCode 200 >=> setHttpHeader "X-Bench" "1" >=> text "composed")
         route "/html" <| htmlView(page "World")
         route "/precond" (validatePreconditions (Some(createETag "v1")) None >=> text "precond")
+        route "/html-dynamic" (fun ctx -> ctx.WriteHtmlView(page "World"))
+        route "/nocache" (noResponseCaching >=> text "nocache")
+        route "/bind-query" <| bindQuery<Person>(fun p -> text p.Name)
     ]
+    POST [
+        route "/bind-form" <| bindForm<Person>(fun p -> text p.Name)
+        route "/bind-json" <| bindJson<Person>(fun p -> text p.Name)
+    ]
+    subRoutef "/org/{%s}" (fun (org: string) -> [
+        GET [ route "/info" (text "org info"); route "/other" (text "other") ]
+    ])
     subRoute "/api" [ GET [ route "/users" <| text "Users received" ] ]
 ]

@@ -52,10 +52,20 @@ type Harness() =
         features.Set<IHttpResponseFeature>(resp)
         features.Set<IHttpResponseBodyFeature>(PipeBodyFeature(pipe))
         features.Set<IServiceProvidersFeature>(ServiceProvidersFeature(RequestServices = app.Services))
-    member _.Run(path: string, query: string) =
-        req.Method <- "GET"
+    member this.Run(path: string, query: string) =
+        this.Run("GET", path, query, null, null)
+    member _.Run(method: string, path: string, query: string, contentType: string, body: byte array) =
+        req.Method <- method
         req.Path <- path
         req.QueryString <- query
+        if isNull body then
+            reqHeaders.Remove("Content-Type") |> ignore
+            reqHeaders.ContentLength <- Nullable()
+            req.Body <- Stream.Null
+        else
+            reqHeaders["Content-Type"] <- contentType
+            reqHeaders.ContentLength <- int64 body.Length
+            req.Body <- new MemoryStream(body, false)
         resp.StatusCode <- 200
         respHeaders.Clear()
         features.Set<IEndpointFeature>(null)
@@ -71,9 +81,41 @@ type Harness() =
         | true, r -> pipe.Reader.AdvanceTo(r.Buffer.End)
         | _ -> ()
 
+let formBody = Text.Encoding.UTF8.GetBytes "Name=don&Age=42"
+let jsonBody = Text.Encoding.UTF8.GetBytes """{"name":"don","age":42}"""
+
+let cases = [
+    "plaintext", "/plaintext", ""
+    "json", "/json", ""
+    "json-users", "/json-users", ""
+    "user", "/user/don/42", ""
+    "ctx", "/userctx/don/42", ""
+    "headers", "/headers", "?q=1"
+    "composed", "/composed", ""
+    "html", "/html", ""
+    "subroute", "/api/users", ""
+    "precond", "/precond", ""
+    "html-dynamic", "/html-dynamic", ""
+    "nocache", "/nocache", ""
+    "bind-query", "/bind-query", "?Name=don&Age=42"
+    "bind-form", "/bind-form", ""
+    "bind-json", "/bind-json", ""
+    "subroutef", "/org/acme/info", ""
+]
+
+let run (h: Harness) name (p: string) (q: string) =
+    match name with
+    | "bind-form" -> h.Run("POST", p, q, "application/x-www-form-urlencoded", formBody)
+    | "bind-json" -> h.Run("POST", p, q, "application/json", jsonBody)
+    | _ -> h.Run(p, q)
+
 [<MemoryDiagnoser>]
 type Endpoints() =
     let h = Harness()
+    [<Benchmark>]
+    member _.A0Warmup() =
+        for _ in 1..4 do
+            h.Run("/plaintext", "")
     [<Benchmark>]
     member _.Plaintext() = h.Run("/plaintext", "")
     [<Benchmark>]
@@ -94,32 +136,87 @@ type Endpoints() =
     member _.SubRoute() = h.Run("/api/users", "")
     [<Benchmark>]
     member _.Precond() = h.Run("/precond", "")
+    [<Benchmark>]
+    member _.HtmlDynamic() = h.Run("/html-dynamic", "")
+    [<Benchmark>]
+    member _.NoCache() = h.Run("/nocache", "")
+    [<Benchmark>]
+    member _.BindQuery() =
+        h.Run("/bind-query", "?Name=don&Age=42")
+    [<Benchmark>]
+    member _.BindForm() = run h "bind-form" "/bind-form" ""
+    [<Benchmark>]
+    member _.BindJson() = run h "bind-json" "/bind-json" ""
+    [<Benchmark>]
+    member _.SubRoutef() = h.Run("/org/acme/info", "")
+
+type AllocListener() =
+    inherit Diagnostics.Tracing.EventListener()
+    member val Counts = Collections.Concurrent.ConcurrentDictionary<string, int64>()
+    override this.OnEventSourceCreated(src) =
+        if src.Name = "Microsoft-Windows-DotNETRuntime" then
+            this.EnableEvents(
+                src,
+                Diagnostics.Tracing.EventLevel.Verbose,
+                LanguagePrimitives.EnumOfValue<int64, Diagnostics.Tracing.EventKeywords> 1L
+            )
+    override this.OnEventWritten(e) =
+        if e.EventName <> null && e.EventName.StartsWith "GCAllocationTick" then
+            let i = e.PayloadNames.IndexOf "TypeName"
+            let name = if i >= 0 then string e.Payload[i] else "?"
+            this.Counts.AddOrUpdate(name, 1L, (fun _ v -> v + 1L)) |> ignore
 
 [<EntryPoint>]
 let main args =
-    if args.Length > 0 && args[0] = "--alloc" then
+    let only = args |> Array.skip(min 1 args.Length) |> Set.ofArray
+    let selected = cases |> List.filter(fun (n, _, _) -> only.IsEmpty || only.Contains n)
+    if args.Length > 1 && args[0] = "--profile" then
+        // sampled allocation types (one sample per ~100 KB allocated) for one endpoint
+        let h = Harness()
+        let name, p, q = cases |> List.find(fun (n, _, _) -> n = args[1])
+        for _ in 1..20000 do
+            run h name p q
+        use l = new AllocListener()
+        for _ in 1..2000000 do
+            run h name p q
+        for KeyValue(k, v) in l.Counts |> Seq.sortByDescending(fun kv -> kv.Value) |> Seq.truncate 25 do
+            printfn "%8d %s" v k
+        0
+    elif args.Length > 0 && args[0] = "--time" then
+        // warm every endpoint 1.5 s, then per endpoint 0.3 s re-warm + 9 rounds of 40k calls, median ns/call
+        let h = Harness()
+        let warm ms name p q =
+            let sw = Diagnostics.Stopwatch.StartNew()
+            while sw.ElapsedMilliseconds < ms do
+                for _ in 1..1000 do
+                    run h name p q
+        for name, p, q in selected do
+            warm 1500L name p q
+        for name, p, q in selected do
+            warm 300L name p q
+            let n = 40000
+            let rounds =
+                [|
+                    for _ in 1..9 do
+                        let t0 = Diagnostics.Stopwatch.GetTimestamp()
+                        for _ in 1..n do
+                            run h name p q
+                        let t1 = Diagnostics.Stopwatch.GetTimestamp()
+                        float(t1 - t0) * 1e9 / float Diagnostics.Stopwatch.Frequency / float n
+                |]
+                |> Array.sort
+            printfn "MICRO %s ns_per_call=%.1f" name rounds[4]
+        0
+    elif args.Length > 0 && args[0] = "--alloc" then
         // deterministic allocated bytes per call, no BDN
         let h = Harness()
-        let cases = [
-            "plaintext", "/plaintext", ""
-            "json", "/json", ""
-            "json-users", "/json-users", ""
-            "user", "/user/don/42", ""
-            "ctx", "/userctx/don/42", ""
-            "headers", "/headers", "?q=1"
-            "composed", "/composed", ""
-            "html", "/html", ""
-            "subroute", "/api/users", ""
-            "precond", "/precond", ""
-        ]
-        let only = args |> Array.skip 1 |> Set.ofArray
-        for name, p, q in cases |> List.filter(fun (n, _, _) -> only.IsEmpty || only.Contains n) do
+        for name, p, q in selected do
             for _ in 1..20000 do
-                h.Run(p, q)
+                run h name p q
             let n = 20000
             let a0 = GC.GetAllocatedBytesForCurrentThread()
             for _ in 1..n do
-                h.Run(p, q)
+                run h name p q
             let a1 = GC.GetAllocatedBytesForCurrentThread()
             printfn "MICRO %s alloc_per_call=%.1f" name (float(a1 - a0) / float n)
         0
