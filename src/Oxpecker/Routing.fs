@@ -418,6 +418,7 @@ module Routers =
                 NestedEndpoint(template, endpoints |> Seq.map(applyHttpVerbsToEndpoint verbs), configure)
             | MultiEndpoint(endpoints, configure) ->
                 MultiEndpoint(endpoints |> Seq.map(applyHttpVerbsToEndpoint verbs), configure))
+        |> Seq.toArray
         |> (fun endpoints -> MultiEndpoint(endpoints, id))
 
     let GET_HEAD: Endpoint seq -> Endpoint = applyHttpVerbsToEndpoints(Verbs [ GET; HEAD ])
