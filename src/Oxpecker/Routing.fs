@@ -174,6 +174,7 @@ module RoutingInternal =
             :?> Task
         else
             match mappings.Length with
+            | 1 -> invoker.Invoke(handler, getArgByIndex routeData mappings 0)
             | 2 -> invoker.Invoke(handler, getArgByIndex routeData mappings 0, getArgByIndex routeData mappings 1)
             | _ ->
                 invoker.Invoke(
