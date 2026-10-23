@@ -1,4 +1,4 @@
-namespace Oxpecker
+﻿namespace Oxpecker
 
 open System
 open System.Collections.Concurrent
@@ -173,14 +173,17 @@ module RoutingInternal =
             |> nonNull
             :?> Task
         else
-            invoker.Invoke(
-                handler,
-                Span [|
-                    for placeholderName, formatChar, modifier in mappings do
-                        let routeValue = routeData[placeholderName] |> string
-                        RouteTemplateBuilder.parse formatChar modifier routeValue
-                |]
-            )
+            match mappings.Length with
+            | 2 -> invoker.Invoke(handler, getArgByIndex routeData mappings 0, getArgByIndex routeData mappings 1)
+            | _ ->
+                invoker.Invoke(
+                    handler,
+                    Span [|
+                        for placeholderName, formatChar, modifier in mappings do
+                            let routeValue = routeData[placeholderName] |> string
+                            RouteTemplateBuilder.parse formatChar modifier routeValue
+                    |]
+                )
             |> nonNull
             :?> FSharpFunc<HttpContext, Task>
             <| ctx
