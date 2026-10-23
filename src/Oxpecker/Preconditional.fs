@@ -164,14 +164,13 @@ type PreconditionExtensions() =
         (ctx: HttpContext, eTag: EntityTagHeaderValue option, lastModified: DateTimeOffset option)
         =
         // Parse headers
-        let responseHeaders = ctx.Response.GetTypedHeaders()
         let requestHeaders = ctx.Request.GetTypedHeaders()
 
         // Set ETag and Last-Modified in the response
         if eTag.IsSome then
-            responseHeaders.ETag <- eTag.Value
+            ctx.Response.Headers.ETag <- eTag.Value.ToString()
         if lastModified.IsSome then
-            responseHeaders.LastModified <- cutOffMs lastModified.Value
+            ctx.Response.Headers.LastModified <- HeaderUtilities.FormatDate(cutOffMs lastModified.Value)
 
         // Validate headers in correct precedence
         // RFC: https://tools.ietf.org/html/rfc7232#section-6
