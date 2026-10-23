@@ -72,13 +72,14 @@ type HttpContext with
                 | false -> ConditionFailed
 
     member private this.ValidateIfNoneMatch (eTag: EntityTagHeaderValue option) (requestHeaders: RequestHeaders) =
-        match requestHeaders.IfNoneMatch.Any() with
+        let ifNoneMatch = requestHeaders.IfNoneMatch
+        match ifNoneMatch.Any() with
         | false -> NoConditionsSpecified
         | true ->
             match eTag with
             | None -> AllConditionsMet
             | Some eTag ->
-                requestHeaders.IfNoneMatch
+                ifNoneMatch
                 |> Seq.exists _.Compare(eTag, false)
                 |> function
                     | false -> AllConditionsMet
